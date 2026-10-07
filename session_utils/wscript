@@ -32,8 +32,9 @@ def build_ardour_util(bld, util):
                      'libardour_cp',
                      'libtemporal',
                      'libmidipp',
-                     'libsuil',
                      ]
+    if bld.is_defined('HAVE_SUIL'):
+        obj.use += [ 'libsuil' ]
     obj.defines = [
         'VERSIONSTRING="' + bld.env['VERSION'] + '"',
         'UTILNAME="'   + str(pgmprefix + '-' + util) + '"',

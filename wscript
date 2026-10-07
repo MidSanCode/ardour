@@ -419,6 +419,139 @@ i18n_children = [
         'libs/tk/ytk',
 ]
 
+# --- target platform abstraction ---------------------------------------------
+#
+# Historically every platform decision in this build system was made against
+# sys.platform / PLATFORM.uname(), i.e. against the *host*.  That conflates host
+# and target as soon as a cross-build targets anything other than mingw/msvc.
+#
+# target_os / target_abi name the platform we build *for*; platform decisions
+# should use these from now on.  build_target keeps its historical meaning
+# (compiler flag selection): aarch64, armhf, i386, x86_64, mingw, msvc, or a
+# macOS codename such as 'ventura'.
+#
+# This is stage 0 of the cross-platform work (see _portability/plan.md): the
+# values exist and the backend selection below uses them, but the per-library
+# wscripts still contain sys.platform checks.
+
+# dist_targets that name a target OS which differs from the host OS
+DIST_TARGET_OS = {
+        'mingw':  'windows',
+        'msvc':   'windows',
+        'wasm32': 'wasm',
+        }
+
+# target ABIs that are members of the x86 family (see target_is_x86 in
+# set_compiler_flags)
+TARGET_X86_ABIS = ('i386', 'i486', 'i586', 'i686', 'x86_64', 'amd64')
+
+# children that need the bundled ytk/ydk/ydk-pixbuf/ztk toolkit, directly or
+# transitively (each one verified against its 'use' list)
+TK_CHILDREN = [
+        'libs/clearlooks-newer',        # use = libztk libytk libydk-pixbuf
+        'libs/tk/ztk',
+        'libs/tk/ydk-pixbuf',
+        'libs/tk/ydk',
+        'libs/tk/ytk',
+        'libs/tk/ztkmm',
+        'libs/tk/ydkmm',
+        'libs/tk/ytkmm',
+        'libs/tk/suil',                 # use = libydk libytk
+        'libs/gtkmm2ext',               # use = libydk libydkmm libytkmm
+        'libs/canvas',                  # use = libgtkmm2ext libytkmm
+        'libs/widgets',                 # use = libgtkmm2ext libytkmm
+        'libs/waveview',                # use = libcanvas libgtkmm2ext libytkmm
+        ]
+
+# children that belong to exactly one frontend, and the --with-frontends name
+# that selects them
+FRONTEND_CHILDREN = {
+        'gtk2_ardour':   'gtk',
+        'headless':      'headless',
+        'luasession':    'lua',
+        'session_utils': 'utils',
+        }
+
+def host_os (platform):
+        """Name of the OS the build is running on."""
+        if platform == 'darwin':
+                return 'macos'
+        if re.search ('(free|open|net)bsd', platform) is not None:
+                return 'bsd'
+        if re.search ('linux', platform) is not None:
+                return 'linux'
+        if re.search ('(mingw|msys|cygwin|windows)', platform) is not None:
+                return 'windows'
+        return 'unknown'
+
+def cc_abi (conf):
+        """Best-effort ABI name taken from the configured C compiler (cross builds)."""
+        try:
+                cc = ' '.join ([str (x) for x in conf.env.CC])
+        except (AttributeError, KeyError, TypeError):
+                return 'x86_64'
+        if re.search ('aarch64|arm64', cc) is not None:
+                return 'aarch64'
+        if re.search ('arm', cc) is not None:
+                return 'armhf'
+        if re.search ('x86_64|amd64|mingw64', cc) is not None:
+                return 'x86_64'
+        if re.search ('i[3-6]86|mingw32|win32', cc) is not None:
+                return 'i386'
+        return 'x86_64'
+
+def host_platform ():
+        """(os, cpu, version) of the build host, as detected elsewhere in this file."""
+        u = PLATFORM.uname ()
+        return u[0].lower (), u[4], u[2]
+
+def resolve_target (conf, platform, dist_target):
+        """Return (target_os, target_abi): the platform we are building for.
+
+        Deliberately independent of env['build_target'], which is only set later
+        in set_compiler_flags(): the target OS/ABI is needed by the dependency
+        checks that run before that.
+        """
+        if dist_target in DIST_TARGET_OS:
+                tgt = DIST_TARGET_OS[dist_target]
+                if tgt == 'wasm':
+                        return 'wasm', 'wasm32'
+                return tgt, cc_abi (conf)
+
+        tgt = host_os (platform)
+        if tgt == 'macos':
+                # the macOS codename stays in build_target; the ABI comes from the compiler
+                return tgt, cc_abi (conf)
+        if dist_target == 'auto':
+                return tgt, cc_abi (conf)
+        # an explicit ABI/codename dist-target
+        return tgt, dist_target
+
+def select_children (env, what = 'build'):
+        """The children to recurse into, honouring --with-frontends/--no-tk-stack.
+
+        'i18n' filters i18n_children (a subset of the build children) with the
+        same rules, so that translations are not built for frontends that are
+        not being built either.
+        """
+        want = env['WITH_FRONTENDS']
+        with_tk = env['WITH_TK_STACK']
+        with_surfaces = env['WITH_SURFACES']
+
+        out = []
+        for i in (children if what == 'build' else i18n_children):
+                if i in TK_CHILDREN and not with_tk:
+                        continue
+                if i == 'libs/surfaces' and not with_surfaces:
+                        continue
+                if i in FRONTEND_CHILDREN:
+                        if want != 'all' and not FRONTEND_CHILDREN[i] in want:
+                                continue
+                        if FRONTEND_CHILDREN[i] == 'gtk' and not with_tk:
+                                continue
+                out.append (i)
+        return out
+
 def set_compiler_flags (conf,opt):
     #
     # Compiler flags and other system-dependent stuff
@@ -543,6 +676,10 @@ int main() { return 0; }''',
     else:
         conf.env['build_target'] = opt.dist_target
 
+    # NOTE: target_os/target_abi (and the frontend selection) are resolved early
+    # in configure(), because the dependency checks there need them; build_target
+    # is only needed for compiler flags, so it stays here.
+
     if not opt.no_fpu_optimization:
         if conf.env['build_target'] == 'armhf' or conf.env['build_target'] == 'aarch64':
             conf.define('ARM_NEON_SUPPORT', 1)
@@ -599,7 +736,13 @@ int main() { return 0; }''',
         c_flags.append("-Qunused-arguments")
         cxx_flags.append("-Qunused-arguments")
 
-    if (re.search ("(i[0-9]86|x86_64|AMD64)", cpu) is not None) and conf.env['build_target'] != 'none':
+    # x86-specific flags follow the *target* ABI, not the host CPU: a wasm or
+    # cross build on an x86_64 host must not get -DARCH_X86/-msse/-masm=att
+    # (wasm runs the generic scalar path; NEON is handled separately below).
+    target_is_x86 = (conf.env['TARGET_ABI'] in TARGET_X86_ABIS
+                     or conf.env['build_target'] in ('i386', 'i686', 'x86_64'))
+
+    if target_is_x86 and conf.env['build_target'] != 'none':
 
         #
         # ARCH_X86 means anything in the x86 family from i386 to x86_64
@@ -610,7 +753,7 @@ int main() { return 0; }''',
         if not (opt.arm64 or conf.env['build_target'] == 'armhf' and conf.env['build_target'] == 'aarch64'):
             compiler_flags.append ("-DARCH_X86")
 
-        if platform == 'linux' and conf.env['build_target'] != 'armhf' and conf.env['build_target'] != 'aarch64':
+        if conf.env['TARGET_OS'] == 'linux' and conf.env['build_target'] != 'armhf' and conf.env['build_target'] != 'aarch64':
 
             #
             # determine processor flags via /proc/cpuinfo
@@ -654,7 +797,7 @@ int main() { return 0; }''',
 
     # optimization section
     if conf.env['FPU_OPTIMIZATION']:
-        if sys.platform == 'darwin':
+        if conf.env['TARGET_OS'] == 'macos':
             compiler_flags.append("-DBUILD_VECLIB_OPTIMIZATIONS")
             conf.env.append_value('LINKFLAGS_OSX', ['-framework', 'Accelerate'])
         elif conf.env['build_target'] == 'i686' or conf.env['build_target'] == 'x86_64':
@@ -665,7 +808,7 @@ int main() { return 0; }''',
             # of the compiler.
             if re.search ('x86_64-w64', str(conf.env['CC'])) is not None:
                     compiler_flags.append ("-DBUILD_SSE_OPTIMIZATIONS")
-        if not build_host_supports_sse:
+        if target_is_x86 and not build_host_supports_sse:
             print("\nWarning: you are building Ardour with SSE support even though your system does not support these instructions. (This may not be an error, especially if you are a package maintainer)")
 
     # end optimization section
@@ -683,7 +826,7 @@ int main() { return 0; }''',
     #
     # Set Apple Compatibility flags
     #
-    if sys.platform == 'darwin':
+    if conf.env['TARGET_OS'] == 'macos':
         # special case our BigSur Intel builder
         if conf.env['build_target'] in ['bigsur'] and not opt.arm64:
             compiler_flags.extend(
@@ -856,7 +999,13 @@ def options(opt):
     opt.add_option('--depstack-root', type='string', default='~', dest='depstack_root',
                     help='Directory/folder where dependency stack trees (gtk, a3) can be found (defaults to ~)')
     opt.add_option('--dist-target', type='string', default='auto', dest='dist_target',
-                    help='Specify the target for cross-compiling [auto,none,x86,i386,i686,x86_64,tiger,leopard,mingw,msvc]')
+                    help='Specify the target for cross-compiling [auto,none,x86,i386,i686,x86_64,tiger,leopard,mingw,msvc,wasm32]')
+    opt.add_option('--with-frontends', type='string', action='store', default='all', dest='with_frontends',
+                    help='Which frontends to build: all (default), or a comma-separated list of gtk,headless,lua,utils, or none')
+    opt.add_option('--no-tk-stack', action='store_true', default=False, dest='no_tk_stack',
+                    help='Do not build the bundled ytk/ydk/ydk-pixbuf/ztk toolkit, or anything depending on it (implies no gtk frontend and no control surfaces)')
+    opt.add_option('--no-surfaces', action='store_true', default=False, dest='no_surfaces',
+                    help='Do not build control surfaces / control protocols')
     opt.add_option('--no-dr-mingw', action='store_true', default=False, dest='no_drmingw',
                     help='Do not write crashdumps using Dr.Mingw (Windows ONLY)')
     opt.add_option('--no-fpu-optimization', action='store_true', default=False, dest='no_fpu_optimization',
@@ -1047,6 +1196,39 @@ def configure(conf):
     else:
         autowaf.display_msg(conf, 'Will build against private Ardour dependency stack', 'no')
 
+    # ---------------------------------------------------------------------
+    # Resolve the platform we are building *for*, and which frontends and
+    # subsystems to build.  This happens here (and not in set_compiler_flags,
+    # which runs much later) because the dependency checks below need it.
+    # ---------------------------------------------------------------------
+
+    conf.env['TARGET_OS'], conf.env['TARGET_ABI'] = resolve_target (conf, host_platform ()[0], Options.options.dist_target)
+    conf.define ('TARGET_OS_' + conf.env['TARGET_OS'].upper (), 1)
+
+    # Frontend / subsystem selection (consumed by select_children() below and at build time)
+    conf.env['WITH_FRONTENDS'] = Options.options.with_frontends
+    conf.env['WITH_TK_STACK'] = not Options.options.no_tk_stack
+    # Control surfaces: --no-surfaces drops the whole directory, while
+    # --no-tk-stack only drops the toolkit-based surfaces (libs/surfaces/wscript
+    # keeps the toolkit-free ones, e.g. the websockets control protocol).
+    conf.env['WITH_SURFACES'] = not Options.options.no_surfaces
+
+    valid_frontends = ['gtk', 'headless', 'lua', 'utils']
+    if conf.env['WITH_FRONTENDS'] not in ('all', 'none'):
+        for f in conf.env['WITH_FRONTENDS'].split(','):
+            if f not in valid_frontends:
+                conf.fatal("--with-frontends: unknown frontend '%s' (known: all, none, %s)" % (f, ', '.join (valid_frontends)))
+        if 'gtk' in conf.env['WITH_FRONTENDS'].split(',') and not conf.env['WITH_TK_STACK']:
+            conf.fatal("--with-frontends=gtk needs the bundled toolkit: drop --no-tk-stack, or pick another frontend")
+
+    autowaf.display_msg (conf, 'Building for', '%s / %s' % (conf.env['TARGET_OS'], conf.env['TARGET_ABI']))
+    autowaf.display_msg (conf, 'Bundled GTK toolkit', 'yes' if conf.env['WITH_TK_STACK'] else 'no')
+    autowaf.display_msg (conf, 'Frontends', conf.env['WITH_FRONTENDS'])
+    if not conf.env['WITH_TK_STACK']:
+        print ('No bundled toolkit: ytk/ydk/ydk-pixbuf/ztk, libgtkmm2ext, libcanvas, libwidgets,')
+        print ('libwaveview, the gtk frontend and the toolkit-based control surfaces are excluded.')
+        print ('The toolkit-free surfaces (websockets control protocol) are still built.')
+
     if Options.options.freebie:
         conf.env.append_value ('CFLAGS', '-DSILENCE_AFTER')
         conf.env.append_value ('CXXFLAGS', '-DSILENCE_AFTER')
@@ -1151,8 +1333,12 @@ def configure(conf):
         conf.env.append_value('CXXFLAGS', '-DBOOST_NO_CXX11_CONSTEXPR')
 
     # executing a test program is n/a when cross-compiling
-    if Options.options.dist_target != 'mingw':
-        if Options.options.dist_target != 'msvc' and re.search ("(open|net)bsd", sys.platform) is None:
+    #
+    # libdl/libdlfcn is POSIX only: on Windows dlopen() is emulated in-tree
+    # (libs/pbd/msvc/msvc_pbd.cc) and in a wasm target there is no dynamic
+    # linking at all, so probing for it must follow the *target*, not the host.
+    if conf.env['TARGET_OS'] not in ('windows', 'wasm'):
+        if re.search ("(open|net)bsd", sys.platform) is None:
             if re.search ("freebsd", sys.platform) is not None:
                 conf.check_cc(
                         msg="Checking for function 'dlopen' in dlfcn.h",
@@ -1163,6 +1349,9 @@ def configure(conf):
                         msg="Checking for function 'dlopen' in dlfcn.h",
                         fragment = "#include <dlfcn.h>\n int main(void) { dlopen (\"\", 0); return 0;}\n",
                         lib='dl', uselib_store='DL', execute = False)
+    else:
+        autowaf.display_msg (conf, "Checking for function 'dlopen' in dlfcn.h",
+                             'n/a for %s' % conf.env['TARGET_OS'])
 
     conf.check_cxx(fragment = "#include <boost/version.hpp>\n#if !defined (BOOST_VERSION) || BOOST_VERSION < 106800\n#error boost >= 1.68 is not available\n#endif\nint main(void) { return 0; }\n",
               execute = False,
@@ -1324,7 +1513,9 @@ int main () { __int128 x = 0; return 0; }
 
     # always use localized gtk2
     conf.define('YTK', 1)
-    conf.define('HAVE_SUIL', 1)
+    # suil embeds plugin GUIs into ytk widgets, so it is only available with the toolkit
+    if conf.env['WITH_TK_STACK']:
+        conf.define('HAVE_SUIL', 1)
 
     # Tell everyone that this is a waf build
 
@@ -1376,16 +1567,20 @@ int main () { __int128 x = 0; return 0; }
         else:
             conf.env['WINDOWS_VST_SUPPORT'] = False
     if not opts.no_lxvst:
-        if sys.platform == 'darwin':
-            conf.env['LXVST_SUPPORT'] = False
-        elif Options.options.dist_target == 'mingw' or Options.options.dist_target == 'msvc':
+        if conf.env['TARGET_OS'] in ('windows', 'macos', 'wasm'):
+            # LinuxVST is a Linux binary-plugin format: there is nothing to host
+            # on Windows/macOS (which have their own hosters) nor on wasm
             conf.env['LXVST_SUPPORT'] = False
         else:
             conf.define('LXVST_SUPPORT', 1)
             conf.env['LXVST_SUPPORT'] = True
     if not opts.no_vst3:
-        conf.define('VST3_SUPPORT', 1)
-        conf.env['VST3_SUPPORT'] = True
+        if conf.env['TARGET_OS'] == 'wasm':
+            # VST3 hosting needs dynamic loading and filesystem plugin scanning
+            conf.env['VST3_SUPPORT'] = False
+        else:
+            conf.define('VST3_SUPPORT', 1)
+            conf.env['VST3_SUPPORT'] = True
     conf.env['WINDOWS_KEY'] = opts.windows_key
     if opts.rt_alloc_debug:
         conf.define('DEBUG_RT_ALLOC', 1)
@@ -1418,17 +1613,19 @@ int main () { __int128 x = 0; return 0; }
 
     if backends == ['']:
         backends = ['dummy']
-        autowaf.check_pkg(conf, 'jack', uselib_store='JACK', atleast_version='1.9.10', mandatory=False)
-        if conf.is_defined('HAVE_JACK'):
-            backends += ['jack']
-        if conf.is_defined('HAVE_PULSEAUDIO'):
-            backends += ['pulseaudio']
 
-        if re.search ("linux", sys.platform) is not None and Options.options.dist_target != 'mingw':
+        if conf.env['TARGET_OS'] != 'wasm':
+            autowaf.check_pkg(conf, 'jack', uselib_store='JACK', atleast_version='1.9.10', mandatory=False)
+            if conf.is_defined('HAVE_JACK'):
+                backends += ['jack']
+            if conf.is_defined('HAVE_PULSEAUDIO'):
+                backends += ['pulseaudio']
+
+        if conf.env['TARGET_OS'] == 'linux':
             backends += ['alsa']
-        if sys.platform == 'darwin':
+        if conf.env['TARGET_OS'] == 'macos':
             backends += ['coreaudio']
-        if Options.options.dist_target == 'mingw' or Options.options.dist_target == 'msvc':
+        if conf.env['TARGET_OS'] == 'windows':
             backends += ['portaudio']
 
     if 'dummy' not in backends:
@@ -1462,16 +1659,23 @@ int main () { __int128 x = 0; return 0; }
                 conf.find_program('lld-link', var='LINK')
                 conf.env.LINK_CXX = conf.env.LINK
 
-    if re.search ("linux", sys.platform) is not None and Options.options.dist_target != 'mingw' and conf.env['BUILD_PABACKEND']:
+    if conf.env['TARGET_OS'] == 'wasm':
+        # there is no native audio device API in a wasm/browser target; until a
+        # webaudio (AudioWorklet) backend lands the dummy backend is all there is
+        unsupported_backends = [b for b in backends if b != 'dummy']
+        if unsupported_backends:
+            conf.fatal("backends not available for wasm32 (only dummy): %s" % ', '.join (unsupported_backends))
+
+    if conf.env['TARGET_OS'] == 'linux' and conf.env['BUILD_PABACKEND']:
         conf.fatal("PortAudio Backend is not for Linux")
 
-    if sys.platform != 'darwin' and conf.env['BUILD_CORECRAPPITA']:
-        conf.fatal("Coreaudio backend is only available for OSX")
+    if conf.env['TARGET_OS'] != 'macos' and conf.env['BUILD_CORECRAPPITA']:
+        conf.fatal("Coreaudio backend is only available on macOS")
 
-    if re.search ("linux", sys.platform) is None and conf.env['BUILD_ALSABACKEND']:
+    if conf.env['TARGET_OS'] != 'linux' and conf.env['BUILD_ALSABACKEND']:
         conf.fatal("ALSA Backend is only available on Linux")
 
-    if re.search ("linux", sys.platform) is None and conf.env['BUILD_PULSEAUDIO']:
+    if conf.env['TARGET_OS'] != 'linux' and conf.env['BUILD_PULSEAUDIO']:
         conf.fatal("PulseAudio Backend is only available on Linux")
 
     if conf.env['BUILD_PULSEAUDIO'] and not conf.is_defined('HAVE_PULSEAUDIO'):
@@ -1494,10 +1698,10 @@ int main () { __int128 x = 0; return 0; }
 
     # explicitly link against libm. This is possible on all POSIX systems
     # and required on Linux for symbol versioning and ABI compatibility
-    if not (Options.options.dist_target == 'mingw' or Options.options.dist_target == 'msvc'):
+    if conf.env['TARGET_OS'] not in ('windows', 'wasm'):
         conf.env.append_value('LIB', 'm')
 
-    for i in children:
+    for i in select_children (conf.env):
         conf.recurse(i)
 
     # Fix utterly braindead FLAC include path to not smash assert.h
@@ -1590,6 +1794,8 @@ const char* const ardour_config_info = "\\n\\
     write_config_text('JACK Backend',          conf.env['BUILD_JACKBACKEND'])
     write_config_text('PulseAudio Backend',    conf.env['BUILD_PULSEAUDIO'])
     config_text.write("\\n\\\n")
+    write_config_text('Target OS',             conf.env['TARGET_OS'])
+    write_config_text('Target ABI',            conf.env['TARGET_ABI'])
     write_config_text('Buildstack', conf.env['DEPSTACK_REV'])
     write_config_text('Mac i386 Architecture', opts.generic)
     write_config_text('Mac ppc Architecture',  opts.ppc)
@@ -1653,7 +1859,7 @@ def build(bld):
         obj.chmod        = Utils.O755
         obj.install_path = bld.env['LIBDIR']
 
-    for i in children:
+    for i in select_children (bld.env):
         bld.recurse(i)
 
     if bld.env['build_target'] == 'msvc': #For using .def generator
@@ -1688,28 +1894,28 @@ class _i18n_build_context(BuildContext):
     fun = 'i18n_func'
 
 def i18n_func(bld):
-    bld.recurse (i18n_children)
+    bld.recurse (select_children (bld.env, 'i18n'))
 
 class _i18n_pot_build_context(BuildContext):
     cmd = 'i18n_pot'
     fun = 'i18n_pot_func'
 
 def i18n_pot_func(bld):
-    bld.recurse (i18n_children)
+    bld.recurse (select_children (bld.env, 'i18n'))
 
 class _i18n_po_build_context(BuildContext):
     cmd = 'i18n_po'
     fun = 'i18n_po_func'
 
 def i18n_po_func(bld):
-    bld.recurse (i18n_children)
+    bld.recurse (select_children (bld.env, 'i18n'))
 
 class _i18n_mo_build_context(BuildContext):
     cmd = 'i18n_mo'
     fun = 'i18n_mo_func'
 
 def i18n_mo_func(bld):
-    bld.recurse (i18n_children)
+    bld.recurse (select_children (bld.env, 'i18n'))
 
 def tarball(bld):
     create_stored_revision()

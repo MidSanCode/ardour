@@ -217,6 +217,6 @@ def build(bld):
         testobj.use          = 'libpbd'
         testobj.name         = 'libpbd-tests'
         testobj.defines      = [ 'PACKAGE="' + I18N_PACKAGE + '"' ]
-        if sys.platform != 'darwin' and bld.env['build_target'] != 'mingw' and  bld.env['build_target'] != 'msvc':
+        if bld.env['TARGET_OS'] in ('linux', 'bsd'):
             testobj.lib      = ['rt', 'dl']
         testobj.install_path = ''

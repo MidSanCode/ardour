@@ -32,7 +32,12 @@ def build(bld):
     obj.name         = 'libardour_websockets'
     obj.target       = 'ardour_websockets'
     obj.uselib       = 'GLIBMM XML WEBSOCKETS OPENSSL SIGCPP'
-    obj.use          = 'libardour libardour_cp libgtkmm2ext libpbd'
+    # NOTE: this surface is deliberately toolkit-free (no ytk/ydk/gtkmm2ext, only
+    # glibmm + boost + libwebsockets): it is the control *protocol* shared with
+    # the web/mobile frontend, and must build where there is no GTK stack
+    # (--no-tk-stack, wasm/mobile targets).  Do not add a toolkit dependency here;
+    # put GUI-level code in gtk2_ardour or a separate surface instead.
+    obj.use          = 'libardour libardour_cp libpbd'
     obj.install_path = os.path.join(bld.env['LIBDIR'], 'surfaces')
 
     if bld.env['build_target'] == 'mingw':

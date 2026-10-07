@@ -23,6 +23,50 @@ children = [
     'console1'
 ]
 
+# Surfaces are hand-classified by their dependency on the bundled toolkit
+# (ytk/ydk/ydk-pixbuf/ztk + libgtkmm2ext, see the root wscript).  A build without
+# the toolkit (--no-tk-stack, and consequently any wasm/mobile job) builds only
+# TK_FREE_CHILDREN; everything else here is a GTK widget-based surface or its
+# GUI.  classify() below fails loudly on a child that is in neither list, so a
+# newly added surface cannot silently break a toolkit-less build.
+TK_CHILDREN = [
+    'faderport',            # use = libgtkmm2ext libytkmm
+    'faderport8',
+    'cc121',
+    'generic_midi',
+    'mackie',
+    'us2400',
+    'launch_control_xl',
+    'osc',
+    'console1',
+    'push2',
+    'contourdesign',
+    'launchpad_pro',
+    'launchpad_x',
+    'launchkey_4',
+    'maschine2',
+    'wiimote',
+    'mcp_http',             # mcp_http_gui.* is Gtk:: based
+]
+
+TK_FREE_CHILDREN = [
+    'websockets',           # control protocol only: glibmm + boost + libwebsockets
+]
+
+def tk_children (env, names):
+    """The subset of `names` that can be built with the current toolkit availability."""
+    if env['WITH_TK_STACK']:
+        return list(names)
+    return [n for n in names if n not in TK_CHILDREN]
+
+def classify (conf, names):
+    """Fail loudly if a surface has not been classified as tk or tk-free."""
+    unknown = [n for n in names if n not in TK_CHILDREN and n not in TK_FREE_CHILDREN]
+    if unknown:
+        conf.fatal("libs/surfaces/wscript: unclassified surface(s): %s\n"
+                   "add each one to TK_CHILDREN (uses the bundled toolkit) or to "
+                   "TK_FREE_CHILDREN (does not) in libs/surfaces/wscript" % ', '.join (unknown))
+
 def options(opt):
     pass
 
@@ -65,30 +109,27 @@ def configure(conf):
         children += [ 'websockets' ]
         children += [ 'mcp_http' ]
 
-    for i in children:
+    classify (conf, children)
+
+    for i in tk_children (conf.env, children):
         conf.recurse(i)
 
 def build(bld):
-    bld.recurse('generic_midi')
-    bld.recurse('faderport')
-    bld.recurse('faderport8')
-    bld.recurse('cc121')
-    bld.recurse('mackie')
-    bld.recurse('us2400')
-    bld.recurse('launch_control_xl')
-    bld.recurse('osc')
-    bld.recurse('console1')
+    todo = [ 'generic_midi', 'faderport', 'faderport8', 'cc121', 'mackie',
+             'us2400', 'launch_control_xl', 'osc', 'console1' ]
 
     if bld.is_defined('BUILD_WIIMOTE'):
-        bld.recurse('wiimote')
+        todo += [ 'wiimote' ]
     if bld.is_defined('HAVE_USB'):
-        bld.recurse('push2')
-        bld.recurse('contourdesign')
-        bld.recurse('launchpad_pro')
-        bld.recurse('launchpad_x')
-        bld.recurse('launchkey_4')
+        todo += [ 'push2', 'contourdesign', 'launchpad_pro', 'launchpad_x', 'launchkey_4' ]
     if bld.is_defined('BUILD_MASCHINE'):
-        bld.recurse('maschine2')
+        todo += [ 'maschine2' ]
     if bld.is_defined ('HAVE_WEBSOCKETS'):
-        bld.recurse('websockets')
-        bld.recurse('mcp_http')
+        todo += [ 'websockets', 'mcp_http' ]
+
+    for i in tk_children (bld.env, todo):
+        bld.recurse(i)
+
+    skipped = [i for i in todo if i not in tk_children (bld.env, todo)]
+    if skipped:
+        print ('Not building toolkit-based surfaces: %s' % ', '.join (skipped))
