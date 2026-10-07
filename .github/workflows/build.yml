@@ -24,24 +24,25 @@
 #   * windows-msys2 : reproduces a recipe that was actually run end to end on a
 #                     Windows 10 + MSYS2 MinGW-w64 machine (1849/1849 targets,
 #                     produces a working ardour-*.exe). Highest confidence.
-#   * linux         : the first CI run reached configure and stopped at
-#                     vamp-sdk/vamp-hostsdk. Both are mandatory, and both are
-#                     shipped by the package named `vamp-plugin-sdk` (there is
-#                     no libvamp-sdk-dev in Ubuntu). The package list is now
-#                     shared through $ARDOUR_APT_DEPS so the three Linux jobs
-#                     cannot drift apart, and the preflight step reports every
-#                     remaining gap at once instead of one per run.
-#   * macos         : the first CI run reached configure and stopped at
-#                     "Checking for boost library >= 1.68 : no". That probe is
-#                     a raw compile, not a pkg-config lookup, so it needs
-#                     CPPFLAGS - the job now exports include, lib and pkgconfig
-#                     paths for every formula it installs. Note that upstream
-#                     states Homebrew is not a viable basis for Ardour's macOS
-#                     build, so treat this job as exploratory: the preflight
-#                     names what is still missing, and the FFTW
-#                     fftwf_make_planner_thread_safe symbol is the next most
-#                     likely blocker (packaged FFTW builds usually omit
-#                     --with-combined-threads).
+#   * linux         : two CI rounds.  The first stopped at vamp-sdk/vamp-hostsdk
+#                     (both mandatory; both shipped by the package named
+#                     `vamp-plugin-sdk` - there is no libvamp-sdk-dev in Ubuntu).
+#                     The second stopped at the FFTW preflight probe, and that
+#                     probe was itself wrong: Ardour links `fftw3f_threads` for
+#                     that symbol (libs/ardour/globals.cc:634 is gated on
+#                     HAVE_FFTW35F, and gtk2_ardour/wscript:719 adds the library
+#                     when it is set), and Ubuntu's libfftw3-dev does ship
+#                     libfftw3f_threads.so.  The probe now links exactly what the
+#                     build links.  configure has still not been seen to finish.
+#   * macos         : the first run stopped at the boost header probe - a real
+#                     workflow bug, since that probe is a raw compile and needs
+#                     $CPPFLAGS rather than PKG_CONFIG_PATH - but the FFTW error
+#                     printed alongside it was the same probe bug as Linux, not a
+#                     real failure.  The one genuine macOS gap found so far is
+#                     vamp-sdk/vamp-hostsdk, now installed via Homebrew's
+#                     vamp-plugin-sdk (2.10.0).  Upstream states Homebrew is not
+#                     a viable basis for Ardour's macOS build, so treat the rest
+#                     of this job as exploratory.
 #   * headless-tkless: the configure half of this job was run by hand on a
 #                     Windows + MSYS2 host (there with --dist-target=mingw); the
 #                     build half has NOT been run anywhere yet.  Expect it to
@@ -53,14 +54,16 @@
 #                     that it stopped there and nowhere earlier.
 #
 # SELECTING TARGETS
-#   push to master and pull_request runs build everything.
-#   A manual run (Actions -> Build -> Run workflow) offers one checkbox per
-#   target, all ticked by default: untick what you do not need and only the
-#   remaining jobs are scheduled. The `selection` job always runs first and
-#   writes the chosen set into the run summary, so it stays obvious what any
-#   given run actually covered.
-#   Manual runs are keyed separately in `concurrency`, so running one target now
-#   and another one later does not cancel the first.
+#   Manual only, by design: there is no push or pull_request trigger, because a
+#   full run is five jobs and the optimised platform builds are hours long.
+#   Actions -> Build -> Run workflow offers one checkbox per target, all ticked
+#   by default: untick what you do not need and only the remaining jobs are
+#   scheduled. The `selection` job always runs first and writes the chosen set
+#   into the run summary, so it stays obvious what any given run covered, and it
+#   fails when nothing was ticked rather than reporting a green run that built
+#   nothing.
+#   Runs are keyed by run_id in `concurrency`, so running one target now and
+#   another one later does not cancel the first.
 #
 # BUILD TIME WARNING
 #   Ardour is ~1M lines of C++ compiled at -O3. On GitHub-hosted runners the
@@ -71,15 +74,11 @@
 name: Build
 
 on:
-  push:
-    branches: [master]
-  pull_request:
   workflow_dispatch:
     inputs:
-      # The five targets are independent - tick only what you need. A manual
-      # dispatch of one target is the fast path; the full set is five jobs and
-      # the optimised platform builds can each take hours.
-      # Automatic runs (push / pull_request) always run everything.
+      # The five targets are independent - tick only what you need. A dispatch
+      # of one target is the fast path; the full set is five jobs and the
+      # optimised platform builds can each take hours.
       linux:
         description: "Linux (x86_64)"
         type: boolean
@@ -106,10 +105,11 @@ on:
         default: false
 
 concurrency:
-  # Push/PR runs coalesce per ref, so a newer commit supersedes an older run.
-  # Manual dispatches are keyed by run_id instead: now that a run can carry a
-  # selection, dispatching "linux now, windows later" must not cancel the first.
-  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || 'auto' }}
+  # Keyed by run_id so that dispatching one target now and another one later
+  # does not cancel the first. Every run therefore has its own group; this
+  # exists so that re-adding an automatic trigger cannot silently reintroduce
+  # cross-run cancellation.
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.run_id }}
   cancel-in-progress: true
 
 permissions:
@@ -182,13 +182,6 @@ jobs:
           IN_WASM32: ${{ inputs.wasm32 }}
         run: |
           echo "### Selected targets" >> "$GITHUB_STEP_SUMMARY"
-          if [ "${{ github.event_name }}" != "workflow_dispatch" ]; then
-            echo "Triggered by \`${{ github.event_name }}\`: all targets enabled." \
-              >> "$GITHUB_STEP_SUMMARY"
-            echo "Triggered by ${{ github.event_name }}: all targets enabled."
-            exit 0
-          fi
-
           echo "| target | enabled |" >> "$GITHUB_STEP_SUMMARY"
           echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
 
@@ -216,7 +209,7 @@ jobs:
   # ---------------------------------------------------------------------------
   linux:
     name: Linux (x86_64)
-    if: github.event_name != 'workflow_dispatch' || inputs.linux
+    if: inputs.linux
     runs-on: ubuntu-22.04
     timeout-minutes: 360
     steps:
@@ -260,6 +253,11 @@ jobs:
             echo "ok  $p $ver"
           done
           # boost has no .pc file at all, so probe the header the way waf does.
+          # $CPPFLAGS is included deliberately: it is the mechanism waf folds
+          # into conf.env, and a probe without it does not test what the build
+          # will actually do.  clang does not read CPPFLAGS itself - it reads
+          # CPATH - which is how the first macOS run reported a boost failure
+          # from a perfectly good boost.
           cat > /tmp/boost_probe.cc <<'EOF'
           #include <boost/version.hpp>
           #if !defined(BOOST_VERSION) || BOOST_VERSION < 106800
@@ -267,28 +265,42 @@ jobs:
           #endif
           int main(void) { return 0; }
           EOF
-          c++ -o /tmp/boost_probe /tmp/boost_probe.cc \
+          c++ $CPPFLAGS -o /tmp/boost_probe /tmp/boost_probe.cc \
             || { echo "::error::boost >= 1.68 headers are not visible to the compiler"; missing=1; }
 
-          # FFTW: Ardour calls fftwf_make_planner_thread_safe(). That symbol
-          # exists only when FFTW is built with threads AND
-          # --with-combined-threads, which packaged builds routinely omit - it
-          # is exactly why the windows-msys2 job builds FFTW from source.
+          # FFTW: mirror the source exactly, and the source is not the obvious
+          # thing.  libs/ardour/wscript defines HAVE_FFTW35F when fftw3f is
+          # >= 3.3.5 (mandatory=False), and that is what gates the call to
+          # fftwf_make_planner_thread_safe() in libs/ardour/globals.cc:634.
+          # When it is defined, gtk2_ardour/wscript:719 and
+          # libs/audiographer/wscript:43 additionally link `fftw3f_threads`,
+          # which is where that symbol actually lives in a normal FFTW build.
+          # fftw3f.pc does not mention it, so linking fftw3f alone reports a
+          # failure the real build never hits.
           # Probe by LINKING rather than by inspecting symbols: linking is the
-          # thing that actually has to succeed, and it is immune to a stripped
+          # thing that has to succeed, and it is not fooled by a stripped
           # library giving a false negative.
           cat > /tmp/fftw_probe.cc <<'EOF'
           #include <fftw3.h>
           int main(void) { fftwf_make_planner_thread_safe(); return 0; }
           EOF
-          if c++ -o /tmp/fftw_probe /tmp/fftw_probe.cc \
-               $(pkg-config --cflags --libs fftw3f) 2> /tmp/fftw_probe.err; then
-            echo "ok  fftw3f provides fftwf_make_planner_thread_safe"
+          if ! pkg-config --atleast-version=3.3.5 fftw3f; then
+            echo "note fftw3f < 3.3.5: HAVE_FFTW35F will not be defined, so the"
+            echo "     threads library is not required"
+          elif c++ -o /tmp/fftw_probe /tmp/fftw_probe.cc \
+                 $(pkg-config --cflags --libs fftw3f) -lfftw3f_threads \
+                 2> /tmp/fftw_probe.err; then
+            echo "ok  fftw3f + fftw3f_threads provide fftwf_make_planner_thread_safe"
           else
-            echo "::error::fftw3f does not provide fftwf_make_planner_thread_safe,"
-            echo "::error::so this build would fail to LINK hours from now. Build"
-            echo "::error::FFTW from source with --enable-float --enable-threads"
-            echo "::error::--with-combined-threads (see the windows-msys2 job)."
+            echo "::error::fftw3f/fftw3f_threads do not provide"
+            echo "::error::fftwf_make_planner_thread_safe, which"
+            echo "::error::libs/ardour/globals.cc calls once HAVE_FFTW35F is set,"
+            echo "::error::so the build would fail to LINK hours from now."
+            echo "::error::On Linux libfftw3-dev ships libfftw3f_threads.so; on"
+            echo "::error::macOS Homebrew's fftw ships libfftw3f_threads.dylib."
+            echo "::error::Do NOT rebuild FFTW with --with-combined-threads on a"
+            echo "::error::POSIX target: that removes the separate library the"
+            echo "::error::build links in.  (It is only correct for mingw.)"
             tail -5 /tmp/fftw_probe.err
             missing=1
           fi
@@ -330,7 +342,7 @@ jobs:
   # ---------------------------------------------------------------------------
   macos:
     name: macOS (arm64)
-    if: github.event_name != 'workflow_dispatch' || inputs.macos
+    if: inputs.macos
     runs-on: macos-14
     timeout-minutes: 360
     steps:
@@ -368,10 +380,13 @@ jobs:
           # Rather than hardcode which formulae are keg-only (glibmm@2.66,
           # libsigc++@2, cairomm@1.14, pangomm@2.46, libxml2 and boost all have
           # been), ask brew for every prefix and export all three mechanisms.
+          # vamp-plugin-sdk is the gap the preflight found on macOS: there is no
+          # `vamp` or `libvamp` formula, and configure demands both vamp-sdk.pc
+          # and vamp-hostsdk.pc. Homebrew's vamp-plugin-sdk (2.10.0) ships both.
           FORMULAE="pkg-config glib glibmm@2.66 libsigc++@2 cairomm@1.14 pangomm@2.46 \
                     libsndfile libsamplerate fftw taglib serd sord sratom lilv lv2 \
                     rubberband aubio libarchive liblo libusb libxml2 flac libogg \
-                    boost curl jack"
+                    libpng vamp-plugin-sdk boost curl jack"
 
           pcp=""; cpp=""; ld=""
           for f in $FORMULAE; do
@@ -390,6 +405,24 @@ jobs:
 
           echo "PKG_CONFIG_PATH=${pcp#:}"
           echo "CPPFLAGS=$cpp"
+
+          # The loop above skips a formula silently when brew does not know it.
+          # Assert the ones a silent skip would hide - boost is probed by a raw
+          # #include, so a missing prefix here is exactly what failed before, and
+          # vamp is what the preflight caught - so this reports the real problem
+          # (an unknown or uninstalled formula) instead of a confusing compile
+          # error two steps later.
+          BOOST_PREFIX="$(brew --prefix boost 2>/dev/null || true)"
+          if [ -n "$BOOST_PREFIX" ] && [ -f "$BOOST_PREFIX/include/boost/version.hpp" ]; then
+            echo "boost headers: $BOOST_PREFIX/include/boost/version.hpp"
+          else
+            echo "::error::boost has no include/boost/version.hpp (brew --prefix boost -> '${BOOST_PREFIX:-<not installed>}')"
+            exit 1
+          fi
+          for p in vamp-sdk vamp-hostsdk; do
+            pkg-config --exists "$p" \
+              || { echo "::error::$p not found - is vamp-plugin-sdk installed?"; exit 1; }
+          done
 
       - name: Preflight - mandatory dependencies and the FFTW threads symbol
         run: |
@@ -412,7 +445,12 @@ jobs:
             echo "ok  $p $ver"
           done
 
-          # boost: raw header probe, exactly as wscript does it (no pkg-config)
+          # boost: raw header probe, exactly as wscript does it (no pkg-config).
+          # $CPPFLAGS matters here more than anywhere else: this probe is why
+          # the first run reported a boost failure from a perfectly good boost.
+          # clang does not read CPPFLAGS itself - it reads CPATH - so a bare
+          # `c++` does not see Homebrew's include dirs, while waf (which folds
+          # CPPFLAGS into conf.env) does.
           cat > /tmp/boost_probe.cc <<'EOF'
           #include <boost/version.hpp>
           #if !defined(BOOST_VERSION) || BOOST_VERSION < 106800
@@ -420,28 +458,41 @@ jobs:
           #endif
           int main(void) { return 0; }
           EOF
-          c++ -o /tmp/boost_probe /tmp/boost_probe.cc \
-            || { echo "::error::boost >= 1.68 is not visible to the compiler"; missing=1; }
+          c++ $CPPFLAGS -o /tmp/boost_probe /tmp/boost_probe.cc \
+            || { echo "::error::boost >= 1.68 headers are not visible to the compiler"; missing=1; }
 
-          # FFTW: Ardour calls fftwf_make_planner_thread_safe(). That symbol
-          # exists only when FFTW is built with threads AND
-          # --with-combined-threads, which packaged builds routinely omit - it
-          # is exactly why the windows-msys2 job builds FFTW from source.
+          # FFTW: mirror the source exactly, and the source is not the obvious
+          # thing.  libs/ardour/wscript defines HAVE_FFTW35F when fftw3f is
+          # >= 3.3.5 (mandatory=False), and that is what gates the call to
+          # fftwf_make_planner_thread_safe() in libs/ardour/globals.cc:634.
+          # When it is defined, gtk2_ardour/wscript:719 and
+          # libs/audiographer/wscript:43 additionally link `fftw3f_threads`,
+          # which is where that symbol actually lives in a normal FFTW build.
+          # fftw3f.pc does not mention it, so linking fftw3f alone reports a
+          # failure the real build never hits.
           # Probe by LINKING rather than by inspecting symbols: linking is the
-          # thing that actually has to succeed, and it is immune to a stripped
-          # binary giving a false negative.
+          # thing that has to succeed, and Homebrew ships stripped libraries, so
+          # `nm` would give a false negative.
           cat > /tmp/fftw_probe.cc <<'EOF'
           #include <fftw3.h>
           int main(void) { fftwf_make_planner_thread_safe(); return 0; }
           EOF
-          if c++ -o /tmp/fftw_probe /tmp/fftw_probe.cc \
-               $(pkg-config --cflags --libs fftw3f) 2> /tmp/fftw_probe.err; then
-            echo "ok  fftw3f provides fftwf_make_planner_thread_safe"
+          if ! pkg-config --atleast-version=3.3.5 fftw3f; then
+            echo "note fftw3f < 3.3.5: HAVE_FFTW35F will not be defined, so the"
+            echo "     threads library is not required"
+          elif c++ -o /tmp/fftw_probe /tmp/fftw_probe.cc \
+                 $(pkg-config --cflags --libs fftw3f) -lfftw3f_threads \
+                 2> /tmp/fftw_probe.err; then
+            echo "ok  fftw3f + fftw3f_threads provide fftwf_make_planner_thread_safe"
           else
-            echo "::error::fftw3f does not provide fftwf_make_planner_thread_safe,"
-            echo "::error::so this build would fail to LINK hours from now. Build"
-            echo "::error::FFTW from source with --enable-float --enable-threads"
-            echo "::error::--with-combined-threads (see the windows-msys2 job)."
+            echo "::error::fftw3f/fftw3f_threads do not provide"
+            echo "::error::fftwf_make_planner_thread_safe, which"
+            echo "::error::libs/ardour/globals.cc calls once HAVE_FFTW35F is set,"
+            echo "::error::so the build would fail to LINK hours from now."
+            echo "::error::On macOS Homebrew's fftw ships libfftw3f_threads.dylib."
+            echo "::error::Do NOT rebuild FFTW with --with-combined-threads on a"
+            echo "::error::POSIX target: that removes the separate library the"
+            echo "::error::build links in.  (It is only correct for mingw.)"
             tail -5 /tmp/fftw_probe.err
             missing=1
           fi
@@ -483,7 +534,7 @@ jobs:
   # ---------------------------------------------------------------------------
   windows-msys2:
     name: Windows (MSYS2 / MinGW-w64)
-    if: github.event_name != 'workflow_dispatch' || inputs.windows
+    if: inputs.windows
     runs-on: windows-2022
     timeout-minutes: 360
     defaults:
@@ -619,7 +670,7 @@ jobs:
   # or into a toolkit-free control surface.
   headless-tkless:
     name: Headless, no toolkit (structural)
-    if: github.event_name != 'workflow_dispatch' || inputs.headless_tkless
+    if: inputs.headless_tkless
     runs-on: ubuntu-22.04
     timeout-minutes: 300
     steps:
@@ -716,7 +767,7 @@ jobs:
   # choice), not the build host.
   wasm32:
     name: wasm32 target selection (structural, configure only)
-    if: github.event_name != 'workflow_dispatch' || inputs.wasm32
+    if: inputs.wasm32
     runs-on: ubuntu-22.04
     timeout-minutes: 60
     env:
