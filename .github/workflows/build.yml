@@ -1,0 +1,588 @@
+# Build Ardour on every platform the project supports: Linux, macOS, Windows.
+#
+# Platform coverage in the Ardour source tree:
+#   * Linux   - alsa / pulseaudio / jack backends
+#   * macOS   - coreaudio backend
+#   * Windows - MSYS2/MinGW-w64 or MSVC; jack backend
+#     (the PortAudio backend needs a PortAudio built with the Steinberg ASIO
+#      SDK, so it is left disabled here - see the Windows job below)
+#
+# Two further jobs do not add platform coverage.  They pin structural
+# invariants of the portable/mobile work, so that a later change cannot quietly
+# undo them:
+#   * headless-tkless - configures AND builds the engine with --no-tk-stack
+#     (no ytk/ydk/ztk/clearlooks/gtkmm2ext/canvas/widgets/waveview at all).
+#     Catches a toolkit dependency creeping back into the engine or into the
+#     toolkit-free control-surface protocol (libs/surfaces/websockets).
+#   * wasm32          - configure only, for --dist-target=wasm32, once with the
+#     host compiler and once with emcc.  Catches a *host* branch leaking into
+#     target selection (flags, dlopen probe, backend choice).  Cross-compiling
+#     the C++ dependency stack to wasm is stage-1 work, so this job asserts the
+#     target-branch decisions instead of a successful build.
+#
+# VERIFICATION STATUS
+#   * windows-msys2 : reproduces a recipe that was actually run end to end on a
+#                     Windows 10 + MSYS2 MinGW-w64 machine (1849/1849 targets,
+#                     produces a working ardour-*.exe). Highest confidence.
+#   * linux         : derived from the mandatory pkg-config checks in the source
+#                     tree (libs/ardour/wscript and friends) plus upstream's
+#                     build docs. NOT yet run - expect a round of package-name
+#                     iteration on the first CI run.
+#   * macos         : same caveat as linux, and additionally depends on which
+#                     versions the Homebrew formulae currently ship (Ardour
+#                     needs the glibmm-2.4 / cairomm-1.0 / pangomm-1.4 API
+#                     lines, now only available as versioned formulae).
+#   * headless-tkless: the configure half of this job was run by hand on a
+#                     Windows + MSYS2 host (there with --dist-target=mingw); the
+#                     build half has NOT been run anywhere yet.  Expect it to
+#                     report real findings on its first run - that is the point.
+#   * wasm32        : both configure steps were run by hand on a Windows host
+#                     against emcc 6.0.11; this job is the Linux-host version of
+#                     them.  The emcc step is *expected* to stop at the first
+#                     C++ dependency that has no wasm build yet, and asserts
+#                     that it stopped there and nowhere earlier.
+#
+# BUILD TIME WARNING
+#   Ardour is ~1M lines of C++ compiled at -O3. On GitHub-hosted runners the
+#   optimized build can approach or exceed the 6 hour job limit, so every job
+#   sets timeout-minutes explicitly and accepts a `debug_build` dispatch input
+#   that drops --optimize to get a much faster (unoptimized) build.
+
+name: Build
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      debug_build:
+        description: "Skip --optimize (much faster CI build, slower binary)"
+        type: boolean
+        default: false
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # waf asks git for the version (`git describe HEAD`). A shallow or tagless
+  # checkout has no reachable tag, which makes waf abort. When that happens the
+  # "Ensure a version..." step below creates this fallback tag. Bump it if you
+  # fork Ardour and never fetch upstream tags.
+  ARDOUR_FALLBACK_VERSION: "9.8"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  linux:
+    name: Linux (x86_64)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # waf derives the program version from git history and tags.
+          fetch-depth: 0
+
+      - name: Install build dependencies
+        run: |
+          set -eux
+          sudo apt-get update -qq
+
+          # Required. Package names map 1:1 onto the pkg-config probes in the
+          # source tree; build-essential gives us the C++17 compiler.
+          # libboost-dev belongs here too: wscript probes <boost/version.hpp>
+          # >= 1.68 with mandatory = True (headers are enough - no boost .so is
+          # linked), and the macOS and Windows jobs install boost as well.
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config python3 git gettext libboost-dev \
+            libglib2.0-dev libglibmm-2.4-dev libsigc++-2.0-dev \
+            libcairo2-dev libcairomm-1.0-dev \
+            libpango1.0-dev libpangomm-1.4-dev libfontconfig1-dev \
+            libpng-dev libsndfile1-dev libsamplerate0-dev libfftw3-dev \
+            libtag1-dev liblilv-dev libserd-dev libsord-dev libsratom-dev \
+            lv2-dev librubberband-dev libaubio-dev libarchive-dev \
+            libcurl4-openssl-dev liblo-dev libusb-1.0-0-dev libxml2-dev \
+            libflac-dev libogg-dev libjack-jackd2-dev libasound2-dev \
+            libx11-dev libxext-dev libxi-dev libxrandr-dev
+
+          # Optional (or missing from some Ubuntu releases). Installed
+          # best-effort so one unavailable name cannot break the whole job.
+          sudo apt-get install -y --no-install-recommends \
+            liblrdf0-dev libpulse-dev libdbus-1-dev libwebsockets-dev \
+            libltc-dev libcppunit-dev libvamp-sdk2v5 libvamp-hostsdk3v5 \
+            || echo "::warning::some optional dependencies were unavailable"
+
+      - name: Ensure a version is available to waf
+        run: |
+          if ! git describe HEAD >/dev/null 2>&1; then
+            echo "No tag reachable from HEAD; creating ${ARDOUR_FALLBACK_VERSION}"
+            git config user.email "ci@users.noreply.github.com"
+            git config user.name "Ardour CI"
+            git tag -a "${ARDOUR_FALLBACK_VERSION}" -m "CI fallback version" --no-sign
+          fi
+          git describe HEAD
+
+      - name: Configure
+        run: |
+          set -x
+          FLAGS="--cxx17 --prefix=/usr/local"
+          if [ "${{ inputs.debug_build }}" != "true" ]; then
+            FLAGS="$FLAGS --optimize"
+          fi
+          ./waf configure $FLAGS
+
+      - name: Build
+        run: ./waf -j"$(nproc)"
+
+      - name: Install into a staging root
+        run: ./waf install --destdir="$PWD/install-root"
+
+      - name: Upload artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ardour-linux-x86_64
+          path: install-root/
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  macos:
+    name: macOS (arm64)
+    runs-on: macos-14
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install build dependencies (Homebrew)
+        run: |
+          set -eux
+          # Ardour needs the *2.4 / *1.0 / *1.4 API lines of the C++ bindings,
+          # which Homebrew only ships as versioned (keg-only) formulae now.
+          # If this step fails, check `brew search` for the current names.
+          brew install \
+            pkg-config glib glibmm@2.66 libsigc++@2 cairomm@1.14 pangomm@2.46 \
+            libsndfile libsamplerate fftw taglib \
+            serd sord sratom lilv lv2 \
+            rubberband aubio libarchive liblo libusb libxml2 flac libogg \
+            boost curl jack
+
+      - name: Put keg-only formulae on PKG_CONFIG_PATH
+        run: |
+          set -eux
+          P="$(brew --prefix glibmm@2.66)/lib/pkgconfig"
+          P="$P:$(brew --prefix libsigc++@2)/lib/pkgconfig"
+          P="$P:$(brew --prefix cairomm@1.14)/lib/pkgconfig"
+          P="$P:$(brew --prefix pangomm@2.46)/lib/pkgconfig"
+          echo "PKG_CONFIG_PATH=$P" >> "$GITHUB_ENV"
+
+      - name: Ensure a version is available to waf
+        run: |
+          if ! git describe HEAD >/dev/null 2>&1; then
+            echo "No tag reachable from HEAD; creating ${ARDOUR_FALLBACK_VERSION}"
+            git config user.email "ci@users.noreply.github.com"
+            git config user.name "Ardour CI"
+            git tag -a "${ARDOUR_FALLBACK_VERSION}" -m "CI fallback version" --no-sign
+          fi
+          git describe HEAD
+
+      - name: Configure
+        run: |
+          set -x
+          FLAGS="--cxx17 --with-backends=coreaudio,dummy --prefix=/usr/local"
+          if [ "${{ inputs.debug_build }}" != "true" ]; then
+            FLAGS="$FLAGS --optimize"
+          fi
+          ./waf configure $FLAGS
+
+      - name: Build
+        run: ./waf -j"$(sysctl -n hw.ncpu)"
+
+      - name: Install into a staging root
+        run: ./waf install --destdir="$PWD/install-root"
+
+      - name: Upload artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ardour-macos-arm64
+          path: install-root/
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  windows-msys2:
+    name: Windows (MSYS2 / MinGW-w64)
+    runs-on: windows-2022
+    timeout-minutes: 360
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            git unzip make
+            mingw-w64-x86_64-toolchain
+            mingw-w64-x86_64-python
+            mingw-w64-x86_64-boost
+            mingw-w64-x86_64-glib2
+            mingw-w64-x86_64-glibmm
+            mingw-w64-x86_64-libsndfile
+            mingw-w64-x86_64-curl
+            mingw-w64-x86_64-libarchive
+            mingw-w64-x86_64-liblo
+            mingw-w64-x86_64-taglib
+            mingw-w64-x86_64-vamp-plugin-sdk
+            mingw-w64-x86_64-rubberband
+            mingw-w64-x86_64-aubio
+            mingw-w64-x86_64-cairomm
+            mingw-w64-x86_64-pangomm
+            mingw-w64-x86_64-jack2
+            mingw-w64-x86_64-serd
+            mingw-w64-x86_64-sord
+            mingw-w64-x86_64-sratom
+            mingw-w64-x86_64-lilv
+            mingw-w64-x86_64-libwebsockets
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-libusb
+
+      - name: Build single-precision FFTW
+        run: |
+          set -eux
+          # REQUIRED, and the single most surprising dependency of the whole
+          # build: Ardour calls fftwf_make_planner_thread_safe(), which the
+          # MSYS2 fftw package does not export because it is built without
+          # --with-combined-threads. Without this, linking fails with an
+          # undefined reference. Build a float+threads FFTW into /mingw64.
+          curl -LO https://fftw.org/fftw-3.3.10.tar.gz
+          tar xf fftw-3.3.10.tar.gz
+          cd fftw-3.3.10
+          ./configure \
+            --build=x86_64-pc-msys --host=x86_64-w64-mingw32 \
+            --prefix=/mingw64 \
+            --enable-shared --disable-static \
+            --enable-float --enable-threads --with-combined-threads \
+            --with-our-malloc \
+            --enable-sse --enable-sse2 --enable-avx --enable-avx2 \
+            --disable-dependency-tracking
+          make -j"$(nproc)"
+          make install
+          # Prove the symbol the link step needs is really there, so a broken
+          # FFTW fails here with a clear message instead of as a confusing
+          # undefined-reference error 500 files later.
+          # NB: use objdump -p (PE export table). `nm -D` reports "no symbols"
+          # for PE binaries, so it cannot be used for this check.
+          if ! objdump -p /mingw64/bin/libfftw3f-3.dll \
+                 | grep -q fftwf_make_planner_thread_safe; then
+            echo "::error::libfftw3f-3.dll does not export fftwf_make_planner_thread_safe"
+            exit 1
+          fi
+          echo "FFTW OK: fftwf_make_planner_thread_safe is exported"
+
+      - name: Ensure a version is available to waf
+        run: |
+          if ! git describe HEAD >/dev/null 2>&1; then
+            echo "No tag reachable from HEAD; creating ${ARDOUR_FALLBACK_VERSION}"
+            git config user.email "ci@users.noreply.github.com"
+            git config user.name "Ardour CI"
+            git tag -a "${ARDOUR_FALLBACK_VERSION}" -m "CI fallback version" --no-sign
+          fi
+          git describe HEAD
+
+      - name: Configure
+        run: |
+          set -x
+          FLAGS="--check-c-compiler=gcc --check-cxx-compiler=g++"
+          FLAGS="$FLAGS --dist-target=mingw"
+          FLAGS="$FLAGS --prefix=$(cygpath -u "$GITHUB_WORKSPACE")/ardour-install"
+          FLAGS="$FLAGS --configdir=share --no-execstack --no-dr-mingw --cxx17"
+          FLAGS="$FLAGS --with-backends=jack,dummy"
+          if [ "${{ inputs.debug_build }}" != "true" ]; then
+            FLAGS="$FLAGS --optimize"
+          fi
+          # --dist-target=mingw is mandatory: it skips the dlopen/dlfcn.h probe,
+          # and mingw-w64 has no dlfcn.h. Without it configure always fails with
+          # "Checking for function 'dlopen' in dlfcn.h : no".
+          python3 waf configure $FLAGS
+
+      - name: Build
+        run: python3 waf -j"$(nproc)"
+
+      - name: Install
+        run: python3 waf install
+
+      - name: Smoke test the binary
+        run: |
+          set -x
+          # NB: do not glob "ardour-*.exe" - that also matches
+          # ardour-vst-scanner.exe / ardour-vst3-scanner.exe.
+          EXE="$(ls ardour-install/lib/ardour9/ardour-[0-9]*.exe | head -1)"
+          test -n "$EXE"
+          ARDOUR_DATA_PATH="$PWD/ardour-install/share/ardour9" "$EXE" --version
+
+      - name: Upload artefact
+        uses: actions/upload-artifact@v4
+        with:
+          # Relative to github.workspace: avoids mixing \ and / in a Windows path.
+          name: ardour-windows-x86_64
+          path: ardour-install
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # Structural: the engine and the headless frontend must build with no toolkit
+  # at all.  This is the precondition for the wasm/mobile targets, and it is the
+  # job that fails when a toolkit dependency creeps back into libardour/libpbd
+  # or into a toolkit-free control surface.
+  headless-tkless:
+    name: Headless, no toolkit (structural)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install build dependencies
+        run: |
+          set -eux
+          sudo apt-get update -qq
+
+          # Deliberately the same set as the linux job above: the variable under
+          # test is --no-tk-stack, not the availability of system libraries.
+          # (The GTK stack that must disappear here is the *in-tree* one,
+          # libs/tk/*, so having libpango/libpangomm installed changes nothing.)
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config python3 git gettext libboost-dev \
+            libglib2.0-dev libglibmm-2.4-dev libsigc++-2.0-dev \
+            libcairo2-dev libcairomm-1.0-dev \
+            libpango1.0-dev libpangomm-1.4-dev libfontconfig1-dev \
+            libpng-dev libsndfile1-dev libsamplerate0-dev libfftw3-dev \
+            libtag1-dev liblilv-dev libserd-dev libsord-dev libsratom-dev \
+            lv2-dev librubberband-dev libaubio-dev libarchive-dev \
+            libcurl4-openssl-dev liblo-dev libusb-1.0-0-dev libxml2-dev \
+            libflac-dev libogg-dev libjack-jackd2-dev libasound2-dev
+
+          sudo apt-get install -y --no-install-recommends \
+            liblrdf0-dev libwebsockets-dev libltc-dev libcppunit-dev \
+            libvamp-sdk2v5 libvamp-hostsdk3v5 \
+            || echo "::warning::some optional dependencies were unavailable"
+
+      - name: Ensure a version is available to waf
+        run: |
+          if ! git describe HEAD >/dev/null 2>&1; then
+            echo "No tag reachable from HEAD; creating ${ARDOUR_FALLBACK_VERSION}"
+            git config user.email "ci@users.noreply.github.com"
+            git config user.name "Ardour CI"
+            git tag -a "${ARDOUR_FALLBACK_VERSION}" -m "CI fallback version" --no-sign
+          fi
+          git describe HEAD
+
+      - name: Configure without the bundled toolkit
+        run: |
+          set -euxo pipefail
+          FLAGS="--cxx17 --prefix=/usr/local --configdir=share"
+          FLAGS="$FLAGS --no-tk-stack --with-frontends=headless"
+          FLAGS="$FLAGS --with-backends=jack,dummy --no-execstack --no-dr-mingw"
+          [ "${{ inputs.debug_build }}" = "true" ] || FLAGS="$FLAGS --optimize"
+          ./waf configure $FLAGS 2>&1 | tee configure.log
+
+          # The toolkit must be *excluded* from the configuration, not merely
+          # unused - and the toolkit-free control-surface protocol must survive.
+          grep -q 'Bundled GTK toolkit *: no' configure.log
+          grep -q 'Frontends *: headless' configure.log
+          if grep -q "Checking for 'libwebsockets'.*: yes" configure.log; then
+            echo "libwebsockets found: the websockets control protocol is in this build"
+          else
+            echo "::warning::libwebsockets not found - the websockets surface was skipped"
+          fi
+
+      - name: Build
+        run: ./waf -j"$(nproc)" 2>&1 | tee build.log
+
+      - name: Verify the toolkit is really absent, and the binary runs
+        run: |
+          set -eux
+
+          # 1. nothing from the bundled toolkit may have been produced at all
+          BAD="$(find build \( \
+                   -name 'libytk*' -o -name 'libydk*' -o -name 'libztk*' \
+                -o -name 'libclearlooks*' -o -name 'libgtkmm2ext*' \
+                -o -name 'libcanvas*' -o -name 'libwidgets*' \
+                -o -name 'libwaveview*' \) -print -quit)"
+          if [ -n "$BAD" ]; then
+            echo "::error::--no-tk-stack still produced toolkit artefacts: $BAD"
+            exit 1
+          fi
+
+          # 2. the engine/frontend must not link a toolkit
+          BIN="$(ls build/headless/hardour-* | head -1)"
+          test -n "$BIN"
+          if ldd "$BIN" | grep -Eq 'libgtk-x11|libgtkmm|libytk|libydk|libztk'; then
+            echo "::error::$BIN links a GTK toolkit"
+            ldd "$BIN" | grep -E 'gtk|ytk|ydk|ztk'
+            exit 1
+          fi
+
+          # 3. it runs. --version returns before any audio backend is created,
+          #    so neither a display nor an audio device is needed.
+          export LD_LIBRARY_PATH="$(find build -name '*.so*' -printf '%h\n' | sort -u | paste -sd:)"
+          "$BIN" --version
+
+  # ---------------------------------------------------------------------------
+  # Structural: --dist-target=wasm32 target selection.  Configure only: what is
+  # being pinned here is that the *target* decides (flags, dlopen probe, backend
+  # choice), not the build host.
+  wasm32:
+    name: wasm32 target selection (structural, configure only)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    env:
+      WASM_FLAGS: >-
+        --cxx17 --configdir=share --dist-target=wasm32
+        --with-frontends=none --no-tk-stack --with-backends=dummy
+        --no-execstack --no-dr-mingw
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install host dependencies
+        run: |
+          set -eux
+          sudo apt-get update -qq
+
+          # Needed so the *host compiler* configure below can run to the end:
+          # the flag summary is printed after all mandatory dependency probes.
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config python3 git gettext libboost-dev \
+            libglib2.0-dev libglibmm-2.4-dev libsigc++-2.0-dev \
+            libcairo2-dev libcairomm-1.0-dev \
+            libpango1.0-dev libpangomm-1.4-dev libfontconfig1-dev \
+            libpng-dev libsndfile1-dev libsamplerate0-dev libfftw3-dev \
+            libtag1-dev liblilv-dev libserd-dev libsord-dev libsratom-dev \
+            lv2-dev librubberband-dev libaubio-dev libarchive-dev \
+            libcurl4-openssl-dev liblo-dev libusb-1.0-0-dev libxml2-dev \
+            libflac-dev libogg-dev libasound2-dev
+
+          sudo apt-get install -y --no-install-recommends \
+            liblrdf0-dev libltc-dev libvamp-sdk2v5 libvamp-hostsdk3v5 \
+            || echo "::warning::some optional dependencies were unavailable"
+
+      - name: Ensure a version is available to waf
+        run: |
+          if ! git describe HEAD >/dev/null 2>&1; then
+            echo "No tag reachable from HEAD; creating ${ARDOUR_FALLBACK_VERSION}"
+            git config user.email "ci@users.noreply.github.com"
+            git config user.name "Ardour CI"
+            git tag -a "${ARDOUR_FALLBACK_VERSION}" -m "CI fallback version" --no-sign
+          fi
+          git describe HEAD
+
+      - name: Configure for wasm32 with the host compiler (flag regression check)
+        run: |
+          set -euxo pipefail
+
+          # A scratch --out: this job configures twice and the two runs must not
+          # overwrite each other's configuration.
+          ./waf configure --out=build-wasm-host \
+            --check-c-compiler=gcc --check-cxx-compiler=g++ $WASM_FLAGS 2>&1 | tee wasm-host.log
+
+          # The target - not the host - must decide.
+          grep -q 'Building for *: wasm / wasm32' wasm-host.log
+          grep -q 'n/a for wasm' wasm-host.log
+          grep -Eq 'LXVST support *: False' wasm-host.log
+          grep -Eq 'VST3 support *: False' wasm-host.log
+
+          # No x86/assembler flag may leak into a wasm build.  This is exactly
+          # the regression that target-driven flag selection exists to prevent:
+          # -DARCH_X86, -msse*, -mfpmath=sse, -masm= and -DLXVST_32BIT all used to
+          # follow the *host* CPU.  Only the flag lines are inspected, so an
+          # unrelated occurrence elsewhere in the log cannot fail the job.
+          FLAGLINES="$(grep -E 'C([+][+])? compiler flags' wasm-host.log)"
+          test -n "$FLAGLINES"
+          if echo "$FLAGLINES" | grep -qE 'ARCH_X86|-msse|-mfpmath=sse|-masm=|LXVST_32BIT'; then
+            echo "::error::host/x86-specific flags leaked into the wasm32 configuration:"
+            echo "$FLAGLINES"
+            exit 1
+          fi
+          echo "wasm32 flag check passed:"
+          echo "$FLAGLINES"
+
+      - name: Configure for wasm32 with emcc
+        run: |
+          set -euxo pipefail
+
+          git clone --depth 1 https://github.com/emscripten-core/emsdk.git "$HOME/emsdk"
+          "$HOME/emsdk/emsdk" install latest
+          "$HOME/emsdk/emsdk" activate latest
+          set +u
+          # shellcheck disable=SC1091
+          source "$HOME/emsdk/emsdk_env.sh"
+          set -u
+          # NB: pin the SDK version once stage 1 has fixed the wasm dependency
+          # baseline; "latest" is only acceptable while this is exploratory.
+
+          # waf 2.0.26 predates Emscripten support (there is no
+          # waflib/Tools/emcc.py), so emcc cannot be named via
+          # --check-c-compiler.  What does work is waf's *clang* tool plus a
+          # CC/CXX override: it calls find_program('clang', var='CC') and then
+          # only requires the compiler to define __clang__, which emcc does.
+          # Verified against emcc 6.0.11.
+          export CC=emcc CXX=em++
+
+          # This configure is expected to FAIL until the dependency stack is
+          # cross-compiled, so the exit status is captured instead of propagated.
+          set +e
+          ./waf configure --out=build-wasm-emcc \
+            --check-c-compiler=clang --check-cxx-compiler=clang++ $WASM_FLAGS 2>&1 | tee wasm-emcc.log
+          STATUS=${PIPESTATUS[0]}
+          set -e
+
+          # The toolchain must be accepted...
+          for probe in "Checking for 'clang' (C compiler)" "Checking for 'clang++' (C++ compiler)"; do
+            LINE="$(grep -F "$probe" wasm-emcc.log || true)"
+            if [ -z "$LINE" ] || [ "${LINE#*not found}" != "$LINE" ]; then
+              echo "::error::waf did not accept emcc: ${LINE:-no '$probe' line in the log}"
+              exit 1
+            fi
+            echo "$LINE"
+          done
+
+          # ...and the target decisions must match the host-compiler run.
+          grep -q 'Building for *: wasm / wasm32' wasm-emcc.log
+          grep -q 'n/a for wasm' wasm-emcc.log
+
+          # No host-platform probe may run for a wasm target: a ": no" on either
+          # of these means a probe ran against the wrong platform.
+          if grep -qE "in dlfcn.h *: no|Could not find gcc" wasm-emcc.log; then
+            echo "::error::a host-platform probe ran (and failed) for the wasm32 target"
+            grep -E "dlfcn|Could not find gcc" wasm-emcc.log
+            exit 1
+          fi
+
+          # Cross-compiling glib/glibmm/boost/... to wasm is stage-1 work, so
+          # configure is *expected* to stop at the first dependency that has no
+          # wasm build yet.  Require that it stopped there - after the target
+          # decisions above were made - and report where, so stage 1 starts from
+          # a known place rather than from a guess.
+          if [ "$STATUS" -ne 0 ]; then
+            if grep -qE 'Checking for boost|boost library|glib-2\.0' wasm-emcc.log; then
+              echo "configure stopped at a dependency that has no wasm build yet:"
+              grep -E 'Checking for boost|boost library|glib-2\.0' wasm-emcc.log | tail -3
+            else
+              echo "::error::configure failed before it reached dependency detection"
+              exit 1
+            fi
+          else
+            echo "configure completed under emcc: the wasm dependency stack resolves now"
+            echo "-> tighten this job: the target decisions are no longer the only thing verified"
+          fi
