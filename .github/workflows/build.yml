@@ -24,14 +24,24 @@
 #   * windows-msys2 : reproduces a recipe that was actually run end to end on a
 #                     Windows 10 + MSYS2 MinGW-w64 machine (1849/1849 targets,
 #                     produces a working ardour-*.exe). Highest confidence.
-#   * linux         : derived from the mandatory pkg-config checks in the source
-#                     tree (libs/ardour/wscript and friends) plus upstream's
-#                     build docs. NOT yet run - expect a round of package-name
-#                     iteration on the first CI run.
-#   * macos         : same caveat as linux, and additionally depends on which
-#                     versions the Homebrew formulae currently ship (Ardour
-#                     needs the glibmm-2.4 / cairomm-1.0 / pangomm-1.4 API
-#                     lines, now only available as versioned formulae).
+#   * linux         : the first CI run reached configure and stopped at
+#                     vamp-sdk/vamp-hostsdk. Both are mandatory, and both are
+#                     shipped by the package named `vamp-plugin-sdk` (there is
+#                     no libvamp-sdk-dev in Ubuntu). The package list is now
+#                     shared through $ARDOUR_APT_DEPS so the three Linux jobs
+#                     cannot drift apart, and the preflight step reports every
+#                     remaining gap at once instead of one per run.
+#   * macos         : the first CI run reached configure and stopped at
+#                     "Checking for boost library >= 1.68 : no". That probe is
+#                     a raw compile, not a pkg-config lookup, so it needs
+#                     CPPFLAGS - the job now exports include, lib and pkgconfig
+#                     paths for every formula it installs. Note that upstream
+#                     states Homebrew is not a viable basis for Ardour's macOS
+#                     build, so treat this job as exploratory: the preflight
+#                     names what is still missing, and the FFTW
+#                     fftwf_make_planner_thread_safe symbol is the next most
+#                     likely blocker (packaged FFTW builds usually omit
+#                     --with-combined-threads).
 #   * headless-tkless: the configure half of this job was run by hand on a
 #                     Windows + MSYS2 host (there with --dist-target=mingw); the
 #                     build half has NOT been run anywhere yet.  Expect it to
@@ -41,6 +51,16 @@
 #                     them.  The emcc step is *expected* to stop at the first
 #                     C++ dependency that has no wasm build yet, and asserts
 #                     that it stopped there and nowhere earlier.
+#
+# SELECTING TARGETS
+#   push to master and pull_request runs build everything.
+#   A manual run (Actions -> Build -> Run workflow) offers one checkbox per
+#   target, all ticked by default: untick what you do not need and only the
+#   remaining jobs are scheduled. The `selection` job always runs first and
+#   writes the chosen set into the run summary, so it stays obvious what any
+#   given run actually covered.
+#   Manual runs are keyed separately in `concurrency`, so running one target now
+#   and another one later does not cancel the first.
 #
 # BUILD TIME WARNING
 #   Ardour is ~1M lines of C++ compiled at -O3. On GitHub-hosted runners the
@@ -56,13 +76,40 @@ on:
   pull_request:
   workflow_dispatch:
     inputs:
+      # The five targets are independent - tick only what you need. A manual
+      # dispatch of one target is the fast path; the full set is five jobs and
+      # the optimised platform builds can each take hours.
+      # Automatic runs (push / pull_request) always run everything.
+      linux:
+        description: "Linux (x86_64)"
+        type: boolean
+        default: true
+      macos:
+        description: "macOS (arm64)"
+        type: boolean
+        default: true
+      windows:
+        description: "Windows (MSYS2 / MinGW-w64)"
+        type: boolean
+        default: true
+      headless_tkless:
+        description: "Structural: headless build without the toolkit"
+        type: boolean
+        default: true
+      wasm32:
+        description: "Structural: wasm32 target selection (configure only)"
+        type: boolean
+        default: true
       debug_build:
         description: "Skip --optimize (much faster CI build, slower binary)"
         type: boolean
         default: false
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  # Push/PR runs coalesce per ref, so a newer commit supersedes an older run.
+  # Manual dispatches are keyed by run_id instead: now that a run can carry a
+  # selection, dispatching "linux now, windows later" must not cancel the first.
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || 'auto' }}
   cancel-in-progress: true
 
 permissions:
@@ -75,10 +122,101 @@ env:
   # fork Ardour and never fetch upstream tags.
   ARDOUR_FALLBACK_VERSION: "9.8"
 
+  # Mandatory Debian/Ubuntu build dependencies, one entry per mandatory
+  # autowaf.check_pkg() in the source tree (plus boost, which is a raw compile
+  # probe rather than a pkg-config one).  Shared by every Linux job so that the
+  # list cannot drift apart between them.
+  #
+  # Two of these names are not guessable and both cost a CI round-trip:
+  #   libboost-dev    - wscript probes `#include <boost/version.hpp>` with
+  #                     mandatory = True.  It is not a pkg-config lookup, so it
+  #                     has to be installed explicitly instead of being left to
+  #                     arrive transitively.
+  #   vamp-plugin-sdk - despite the name this is the package that ships BOTH
+  #                     vamp-sdk.pc and vamp-hostsdk.pc.  There is no
+  #                     "libvamp-sdk-dev" in Ubuntu (nor "libvamp-sdk2v5"-with-
+  #                     headers); the headers and .pc files live in this
+  #                     oddly-named package.  Both vamp-sdk and vamp-hostsdk are
+  #                     mandatory, so configure stops dead without it.
+  ARDOUR_APT_DEPS: >-
+    build-essential pkg-config python3 git gettext
+    libboost-dev
+    libglib2.0-dev libglibmm-2.4-dev libsigc++-2.0-dev
+    libcairo2-dev libcairomm-1.0-dev
+    libpango1.0-dev libpangomm-1.4-dev libfontconfig1-dev
+    libpng-dev libsndfile1-dev libsamplerate0-dev libfftw3-dev
+    libtag1-dev libxml2-dev libflac-dev libogg-dev
+    liblilv-dev libserd-dev libsord-dev libsratom-dev lv2-dev
+    librubberband-dev libaubio-dev
+    vamp-plugin-sdk
+    libarchive-dev libcurl4-openssl-dev liblo-dev
+    libjack-jackd2-dev libasound2-dev
+    libx11-dev libxext-dev
+
+  # Optional dependencies, installed one at a time and allowed to fail.  None of
+  # these can be mandatory for the configurations built here: cppunit is only
+  # required with --build-tests, ltc and fluidsynth only with external libs, and
+  # the rest are auto-detected features.
+  ARDOUR_APT_DEPS_OPTIONAL: >-
+    libusb-1.0-0-dev libpulse-dev libxi-dev libxrandr-dev
+    liblrdf0-dev libsoundtouch-dev libwebsockets-dev
+    libdbus-1-dev libcppunit-dev libltc-dev libfreetype6-dev
+
 jobs:
+  # ---------------------------------------------------------------------------
+  # Always runs, even when every target is unticked. It makes the selection
+  # visible before the expensive jobs start, and turns "dispatched with nothing
+  # selected" - which would otherwise be a silently green run with zero jobs -
+  # into a failure.
+  selection:
+    name: Selected targets
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      - name: Report the selection
+        env:
+          IN_LINUX: ${{ inputs.linux }}
+          IN_MACOS: ${{ inputs.macos }}
+          IN_WINDOWS: ${{ inputs.windows }}
+          IN_HEADLESS_TKLESS: ${{ inputs.headless_tkless }}
+          IN_WASM32: ${{ inputs.wasm32 }}
+        run: |
+          echo "### Selected targets" >> "$GITHUB_STEP_SUMMARY"
+          if [ "${{ github.event_name }}" != "workflow_dispatch" ]; then
+            echo "Triggered by \`${{ github.event_name }}\`: all targets enabled." \
+              >> "$GITHUB_STEP_SUMMARY"
+            echo "Triggered by ${{ github.event_name }}: all targets enabled."
+            exit 0
+          fi
+
+          echo "| target | enabled |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
+
+          enabled=0
+          for pair in "linux:$IN_LINUX" "macos:$IN_MACOS" \
+                      "windows:$IN_WINDOWS" \
+                      "headless-tkless:$IN_HEADLESS_TKLESS" \
+                      "wasm32:$IN_WASM32"; do
+            target="${pair%%:*}"; value="${pair#*:}"
+            if [ "$value" = "true" ]; then
+              row="| \`$target\` | yes |"; enabled=$((enabled + 1))
+            else
+              row="| \`$target\` | no |"
+            fi
+            echo "$row" >> "$GITHUB_STEP_SUMMARY"
+            echo "$row"
+          done
+
+          if [ "$enabled" -eq 0 ]; then
+            echo "::error::no target selected - this run would build nothing"
+            exit 1
+          fi
+          echo "$enabled of 5 targets selected"
+
   # ---------------------------------------------------------------------------
   linux:
     name: Linux (x86_64)
+    if: github.event_name != 'workflow_dispatch' || inputs.linux
     runs-on: ubuntu-22.04
     timeout-minutes: 360
     steps:
@@ -91,30 +229,71 @@ jobs:
         run: |
           set -eux
           sudo apt-get update -qq
+          # shellcheck disable=SC2086
+          sudo apt-get install -y --no-install-recommends $ARDOUR_APT_DEPS
 
-          # Required. Package names map 1:1 onto the pkg-config probes in the
-          # source tree; build-essential gives us the C++17 compiler.
-          # libboost-dev belongs here too: wscript probes <boost/version.hpp>
-          # >= 1.68 with mandatory = True (headers are enough - no boost .so is
-          # linked), and the macOS and Windows jobs install boost as well.
-          sudo apt-get install -y --no-install-recommends \
-            build-essential pkg-config python3 git gettext libboost-dev \
-            libglib2.0-dev libglibmm-2.4-dev libsigc++-2.0-dev \
-            libcairo2-dev libcairomm-1.0-dev \
-            libpango1.0-dev libpangomm-1.4-dev libfontconfig1-dev \
-            libpng-dev libsndfile1-dev libsamplerate0-dev libfftw3-dev \
-            libtag1-dev liblilv-dev libserd-dev libsord-dev libsratom-dev \
-            lv2-dev librubberband-dev libaubio-dev libarchive-dev \
-            libcurl4-openssl-dev liblo-dev libusb-1.0-0-dev libxml2-dev \
-            libflac-dev libogg-dev libjack-jackd2-dev libasound2-dev \
-            libx11-dev libxext-dev libxi-dev libxrandr-dev
+      - name: Install optional dependencies (best effort)
+        run: |
+          set -ux
+          # One apt invocation per package on purpose: a single unavailable name
+          # must not take the rest of the group down with it.
+          for p in $ARDOUR_APT_DEPS_OPTIONAL; do
+            sudo apt-get install -y --no-install-recommends "$p" \
+              || echo "::warning::$p is not available - continuing without it"
+          done
 
-          # Optional (or missing from some Ubuntu releases). Installed
-          # best-effort so one unavailable name cannot break the whole job.
-          sudo apt-get install -y --no-install-recommends \
-            liblrdf0-dev libpulse-dev libdbus-1-dev libwebsockets-dev \
-            libltc-dev libcppunit-dev libvamp-sdk2v5 libvamp-hostsdk3v5 \
-            || echo "::warning::some optional dependencies were unavailable"
+      - name: Preflight - every mandatory dependency is really present
+        run: |
+          # configure aborts on the first missing mandatory dependency, which
+          # turns a long build into a slow game of whack-a-mole.  Report all of
+          # them at once instead, before anything expensive happens.
+          set -u
+          missing=0
+          for p in alsa glib-2.0 gthread-2.0 gio-2.0 gobject-2.0 gmodule-2.0 \
+                   glibmm-2.4 giomm-2.4 sigc++-2.0 cairo cairomm-1.0 \
+                   pango pangocairo pangomm-1.4 fontconfig libpng \
+                   sndfile samplerate fftw3f taglib libxml-2.0 flac ogg \
+                   libcurl libarchive liblo lilv-0 serd-0 sord-0 sratom-0 lv2 \
+                   rubberband aubio vamp-sdk vamp-hostsdk x11 xext jack; do
+            ver="$(pkg-config --modversion "$p" 2>/dev/null)" \
+              || { echo "::error::MISSING pkg-config package: $p"; missing=1; continue; }
+            echo "ok  $p $ver"
+          done
+          # boost has no .pc file at all, so probe the header the way waf does.
+          cat > /tmp/boost_probe.cc <<'EOF'
+          #include <boost/version.hpp>
+          #if !defined(BOOST_VERSION) || BOOST_VERSION < 106800
+          #error boost >= 1.68 is not available
+          #endif
+          int main(void) { return 0; }
+          EOF
+          c++ -o /tmp/boost_probe /tmp/boost_probe.cc \
+            || { echo "::error::boost >= 1.68 headers are not visible to the compiler"; missing=1; }
+
+          # FFTW: Ardour calls fftwf_make_planner_thread_safe(). That symbol
+          # exists only when FFTW is built with threads AND
+          # --with-combined-threads, which packaged builds routinely omit - it
+          # is exactly why the windows-msys2 job builds FFTW from source.
+          # Probe by LINKING rather than by inspecting symbols: linking is the
+          # thing that actually has to succeed, and it is immune to a stripped
+          # library giving a false negative.
+          cat > /tmp/fftw_probe.cc <<'EOF'
+          #include <fftw3.h>
+          int main(void) { fftwf_make_planner_thread_safe(); return 0; }
+          EOF
+          if c++ -o /tmp/fftw_probe /tmp/fftw_probe.cc \
+               $(pkg-config --cflags --libs fftw3f) 2> /tmp/fftw_probe.err; then
+            echo "ok  fftw3f provides fftwf_make_planner_thread_safe"
+          else
+            echo "::error::fftw3f does not provide fftwf_make_planner_thread_safe,"
+            echo "::error::so this build would fail to LINK hours from now. Build"
+            echo "::error::FFTW from source with --enable-float --enable-threads"
+            echo "::error::--with-combined-threads (see the windows-msys2 job)."
+            tail -5 /tmp/fftw_probe.err
+            missing=1
+          fi
+
+          test "$missing" -eq 0
 
       - name: Ensure a version is available to waf
         run: |
@@ -151,6 +330,7 @@ jobs:
   # ---------------------------------------------------------------------------
   macos:
     name: macOS (arm64)
+    if: github.event_name != 'workflow_dispatch' || inputs.macos
     runs-on: macos-14
     timeout-minutes: 360
     steps:
@@ -171,14 +351,102 @@ jobs:
             rubberband aubio libarchive liblo libusb libxml2 flac libogg \
             boost curl jack
 
-      - name: Put keg-only formulae on PKG_CONFIG_PATH
+      - name: Point the compiler, linker and pkg-config at Homebrew
         run: |
           set -eux
-          P="$(brew --prefix glibmm@2.66)/lib/pkgconfig"
-          P="$P:$(brew --prefix libsigc++@2)/lib/pkgconfig"
-          P="$P:$(brew --prefix cairomm@1.14)/lib/pkgconfig"
-          P="$P:$(brew --prefix pangomm@2.46)/lib/pkgconfig"
-          echo "PKG_CONFIG_PATH=$P" >> "$GITHUB_ENV"
+          # First CI run failed here-by-omission with
+          #   Checking for boost library >= 1.68 : no
+          # wscript probes boost with a raw compile (`#include
+          # <boost/version.hpp>`), NOT with pkg-config, so PKG_CONFIG_PATH alone
+          # can never satisfy it.  Homebrew does not link keg-only formulae into
+          # the prefix, and the Homebrew include dir is not on clang's default
+          # search path, so CPPFLAGS is the lever that reaches that probe.
+          # waf does fold CPPFLAGS and LDFLAGS from the environment into
+          # conf.env - verified locally against waf 2.0.26, where the value
+          # shows up verbatim in the recorded compile command.
+          #
+          # Rather than hardcode which formulae are keg-only (glibmm@2.66,
+          # libsigc++@2, cairomm@1.14, pangomm@2.46, libxml2 and boost all have
+          # been), ask brew for every prefix and export all three mechanisms.
+          FORMULAE="pkg-config glib glibmm@2.66 libsigc++@2 cairomm@1.14 pangomm@2.46 \
+                    libsndfile libsamplerate fftw taglib serd sord sratom lilv lv2 \
+                    rubberband aubio libarchive liblo libusb libxml2 flac libogg \
+                    boost curl jack"
+
+          pcp=""; cpp=""; ld=""
+          for f in $FORMULAE; do
+            PFX="$(brew --prefix "$f" 2>/dev/null || true)"
+            [ -n "$PFX" ] || continue
+            if [ -d "$PFX/include" ]; then cpp="$cpp -I$PFX/include"; fi
+            if [ -d "$PFX/lib" ]; then ld="$ld -L$PFX/lib"; fi
+            if [ -d "$PFX/lib/pkgconfig" ]; then pcp="$pcp:$PFX/lib/pkgconfig"; fi
+          done
+
+          {
+            echo "PKG_CONFIG_PATH=${pcp#:}"
+            echo "CPPFLAGS=$cpp"
+            echo "LDFLAGS=$ld"
+          } >> "$GITHUB_ENV"
+
+          echo "PKG_CONFIG_PATH=${pcp#:}"
+          echo "CPPFLAGS=$cpp"
+
+      - name: Preflight - mandatory dependencies and the FFTW threads symbol
+        run: |
+          # Fail in seconds with the whole list rather than hours into a build
+          # with one item at a time.
+          set -u
+          missing=0
+
+          # Everything configure will demand, in the order it demands it.
+          # (alsa and jack are absent on purpose: this job configures
+          # --with-backends=coreaudio,dummy.)
+          for p in glib-2.0 gthread-2.0 glibmm-2.4 sndfile giomm-2.4 libcurl \
+                   libarchive liblo taglib vamp-sdk vamp-hostsdk rubberband \
+                   gio-2.0 gobject-2.0 gmodule-2.0 gio-unix-2.0 sigc++-2.0 \
+                   cairo cairomm-1.0 pango pangocairo pangomm-1.4 fontconfig \
+                   libpng libxml-2.0 flac ogg lilv-0 serd-0 sord-0 sratom-0 \
+                   lv2 samplerate fftw3f; do
+            ver="$(pkg-config --modversion "$p" 2>/dev/null)" \
+              || { echo "::error::MISSING pkg-config package: $p"; missing=1; continue; }
+            echo "ok  $p $ver"
+          done
+
+          # boost: raw header probe, exactly as wscript does it (no pkg-config)
+          cat > /tmp/boost_probe.cc <<'EOF'
+          #include <boost/version.hpp>
+          #if !defined(BOOST_VERSION) || BOOST_VERSION < 106800
+          #error boost >= 1.68 is not available
+          #endif
+          int main(void) { return 0; }
+          EOF
+          c++ -o /tmp/boost_probe /tmp/boost_probe.cc \
+            || { echo "::error::boost >= 1.68 is not visible to the compiler"; missing=1; }
+
+          # FFTW: Ardour calls fftwf_make_planner_thread_safe(). That symbol
+          # exists only when FFTW is built with threads AND
+          # --with-combined-threads, which packaged builds routinely omit - it
+          # is exactly why the windows-msys2 job builds FFTW from source.
+          # Probe by LINKING rather than by inspecting symbols: linking is the
+          # thing that actually has to succeed, and it is immune to a stripped
+          # binary giving a false negative.
+          cat > /tmp/fftw_probe.cc <<'EOF'
+          #include <fftw3.h>
+          int main(void) { fftwf_make_planner_thread_safe(); return 0; }
+          EOF
+          if c++ -o /tmp/fftw_probe /tmp/fftw_probe.cc \
+               $(pkg-config --cflags --libs fftw3f) 2> /tmp/fftw_probe.err; then
+            echo "ok  fftw3f provides fftwf_make_planner_thread_safe"
+          else
+            echo "::error::fftw3f does not provide fftwf_make_planner_thread_safe,"
+            echo "::error::so this build would fail to LINK hours from now. Build"
+            echo "::error::FFTW from source with --enable-float --enable-threads"
+            echo "::error::--with-combined-threads (see the windows-msys2 job)."
+            tail -5 /tmp/fftw_probe.err
+            missing=1
+          fi
+
+          test "$missing" -eq 0
 
       - name: Ensure a version is available to waf
         run: |
@@ -215,6 +483,7 @@ jobs:
   # ---------------------------------------------------------------------------
   windows-msys2:
     name: Windows (MSYS2 / MinGW-w64)
+    if: github.event_name != 'workflow_dispatch' || inputs.windows
     runs-on: windows-2022
     timeout-minutes: 360
     defaults:
@@ -229,6 +498,11 @@ jobs:
         with:
           msystem: MINGW64
           update: true
+          # mingw-w64-x86_64-portaudio is listed explicitly even though jack2
+          # pulls it in: on Windows libs/backends/jack/wscript probes
+          # portaudio-2.0 with mandatory=True (it uses PortAudio to enumerate
+          # device names). Relying on a transitive dependency for a mandatory
+          # probe is how it silently disappears later.
           install: >-
             git unzip make
             mingw-w64-x86_64-toolchain
@@ -247,6 +521,7 @@ jobs:
             mingw-w64-x86_64-cairomm
             mingw-w64-x86_64-pangomm
             mingw-w64-x86_64-jack2
+            mingw-w64-x86_64-portaudio
             mingw-w64-x86_64-serd
             mingw-w64-x86_64-sord
             mingw-w64-x86_64-sratom
@@ -344,6 +619,7 @@ jobs:
   # or into a toolkit-free control surface.
   headless-tkless:
     name: Headless, no toolkit (structural)
+    if: github.event_name != 'workflow_dispatch' || inputs.headless_tkless
     runs-on: ubuntu-22.04
     timeout-minutes: 300
     steps:
@@ -360,21 +636,18 @@ jobs:
           # test is --no-tk-stack, not the availability of system libraries.
           # (The GTK stack that must disappear here is the *in-tree* one,
           # libs/tk/*, so having libpango/libpangomm installed changes nothing.)
-          sudo apt-get install -y --no-install-recommends \
-            build-essential pkg-config python3 git gettext libboost-dev \
-            libglib2.0-dev libglibmm-2.4-dev libsigc++-2.0-dev \
-            libcairo2-dev libcairomm-1.0-dev \
-            libpango1.0-dev libpangomm-1.4-dev libfontconfig1-dev \
-            libpng-dev libsndfile1-dev libsamplerate0-dev libfftw3-dev \
-            libtag1-dev liblilv-dev libserd-dev libsord-dev libsratom-dev \
-            lv2-dev librubberband-dev libaubio-dev libarchive-dev \
-            libcurl4-openssl-dev liblo-dev libusb-1.0-0-dev libxml2-dev \
-            libflac-dev libogg-dev libjack-jackd2-dev libasound2-dev
+          # The set is shared through $ARDOUR_APT_DEPS precisely so that it
+          # cannot drift away from the linux job.
+          # shellcheck disable=SC2086
+          sudo apt-get install -y --no-install-recommends $ARDOUR_APT_DEPS
 
-          sudo apt-get install -y --no-install-recommends \
-            liblrdf0-dev libwebsockets-dev libltc-dev libcppunit-dev \
-            libvamp-sdk2v5 libvamp-hostsdk3v5 \
-            || echo "::warning::some optional dependencies were unavailable"
+      - name: Install optional dependencies (best effort)
+        run: |
+          set -ux
+          for p in $ARDOUR_APT_DEPS_OPTIONAL; do
+            sudo apt-get install -y --no-install-recommends "$p" \
+              || echo "::warning::$p is not available - continuing without it"
+          done
 
       - name: Ensure a version is available to waf
         run: |
@@ -443,6 +716,7 @@ jobs:
   # choice), not the build host.
   wasm32:
     name: wasm32 target selection (structural, configure only)
+    if: github.event_name != 'workflow_dispatch' || inputs.wasm32
     runs-on: ubuntu-22.04
     timeout-minutes: 60
     env:
@@ -462,20 +736,19 @@ jobs:
 
           # Needed so the *host compiler* configure below can run to the end:
           # the flag summary is printed after all mandatory dependency probes.
-          sudo apt-get install -y --no-install-recommends \
-            build-essential pkg-config python3 git gettext libboost-dev \
-            libglib2.0-dev libglibmm-2.4-dev libsigc++-2.0-dev \
-            libcairo2-dev libcairomm-1.0-dev \
-            libpango1.0-dev libpangomm-1.4-dev libfontconfig1-dev \
-            libpng-dev libsndfile1-dev libsamplerate0-dev libfftw3-dev \
-            libtag1-dev liblilv-dev libserd-dev libsord-dev libsratom-dev \
-            lv2-dev librubberband-dev libaubio-dev libarchive-dev \
-            libcurl4-openssl-dev liblo-dev libusb-1.0-0-dev libxml2-dev \
-            libflac-dev libogg-dev libasound2-dev
+          # (The shared list also brings jack/alsa/x11, which this job does not
+          # use - it configures --with-backends=dummy.  Harmless, and it keeps
+          # one single place where the mandatory set is maintained.)
+          # shellcheck disable=SC2086
+          sudo apt-get install -y --no-install-recommends $ARDOUR_APT_DEPS
 
-          sudo apt-get install -y --no-install-recommends \
-            liblrdf0-dev libltc-dev libvamp-sdk2v5 libvamp-hostsdk3v5 \
-            || echo "::warning::some optional dependencies were unavailable"
+      - name: Install optional dependencies (best effort)
+        run: |
+          set -ux
+          for p in $ARDOUR_APT_DEPS_OPTIONAL; do
+            sudo apt-get install -y --no-install-recommends "$p" \
+              || echo "::warning::$p is not available - continuing without it"
+          done
 
       - name: Ensure a version is available to waf
         run: |
