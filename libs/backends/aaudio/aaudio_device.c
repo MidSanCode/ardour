@@ -71,9 +71,10 @@ aa_device_open_common (int32_t sample_rate, int32_t channel_count, int32_t frame
 	AAudioStreamBuilder_setPerformanceMode (builder, AAUDIO_PERFORMANCE_MODE_LOW_LATENCY);
 	AAudioStreamBuilder_setSharingMode (builder, AAUDIO_SHARING_MODE_SHARED);
 
-	if (frames_per_burst > 0) {
-		AAudioStreamBuilder_setFramesPerDataCallback (builder, frames_per_burst);
-	}
+	/* The stream is used in blocking mode, so the burst size is chosen by the
+	 * device and reported by AAudioStream_getFramesPerBurst().  The request is
+	 * kept for the API, but it is only a hint. */
+	(void) frames_per_burst;
 
 	aaudio_result_t result = AAUDIO_OK;
 	AAudioStream* stream = AAudioStreamBuilder_openStream (builder, &result);
@@ -160,10 +161,9 @@ aa_device_map_error (AAudioDevice* device, aaudio_result_t result)
 	case AAUDIO_ERROR_INTERRUPTED:
 		aa_device_set_error (device, "stream interrupted");
 		return AAUDIO_DEVICE_INTERRUPTED;
-	case AAUDIO_ERROR_UNSUPPORTED:
-		aa_device_set_error (device, "format not supported by the device");
-		return AAUDIO_DEVICE_UNSUPPORTED;
 	default:
+		/* the text of the AAudio result is more informative than any
+		 * mapping of it onto the status codes of this wrapper */
 		aa_device_set_error (device, AAudio_convert_result_to_text (result));
 		return AAUDIO_DEVICE_ERROR;
 	}
