@@ -7,14 +7,14 @@ def options(opt):
     pass
 
 def configure(conf):
-    # AAudio is part of the NDK (libAAudio.so) and only exists from API 26 on
+    # AAudio is part of the NDK (libaaudio.so) and only exists from API 26 on
     if conf.env['TARGET_OS'] != 'android':
         conf.fatal("the aaudio backend is only available for an Android target")
     if conf.env.get('ANDROID_API', 26) < 26:
         conf.fatal("the aaudio backend needs Android API 26 or later (AAudio was added in API 26)")
     conf.check_cc(header_name='aaudio/AAudio.h', mandatory=True)
-    conf.check_cc(linkflags='-lAAudio', mandatory=True, execute=False,
-                  msg='Checking for libAAudio')
+    conf.check_cc(linkflags='-laaudio', mandatory=True, execute=False,
+                  msg='Checking for libaaudio')
 
 def build(bld):
     # The AAudio wrapper is plain C without an Ardour dependency, so that it

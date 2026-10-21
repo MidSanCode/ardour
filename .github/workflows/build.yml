@@ -57,7 +57,7 @@
 #                     them.  The emcc step is *expected* to stop at the first
 #                     C++ dependency that has no wasm build yet, and asserts
 #                     that it stopped there and nowhere earlier.
-#   * android       : four rounds so far.  The first one failed in the
+#   * android       : five rounds so far.  The first one failed in the
 #                     setup-android action: it installs the "tools" package by
 #                     default, and the SDK repository does not serve it any
 #                     more.  The second one got as far as the compile of the
@@ -68,10 +68,15 @@
 #                     result is the return value, the result codes are
 #                     converted with AAudio_convertResultToText, and the
 #                     interrupted code is not part of the API of this NDK
-#                     version).  The third one found the last of them.  The
-#                     configure of the android target works in every round:
-#                     the NDK toolchain is selected, and the target decisions
-#                     are the Android ones.
+#                     version).  The third one found the last of them, the
+#                     fourth one failed at the link because the library of the
+#                     NDK is libaaudio.so.  The fifth one is green: the NDK
+#                     toolchain is selected, the target decisions are the
+#                     Android ones, the configure stops at the first
+#                     dependency that has no cross-compiled build (boost), the
+#                     AAudio wrapper compiles and links against the NDK, the
+#                     JNI bridge compiles against the NDK, and the
+#                     application shell assembles into an APK.
 #
 # SELECTING TARGETS
 #   Manual only, by design: there is no push or pull_request trigger, because a
@@ -1134,6 +1139,11 @@ jobs:
                           -iname 'libaaudio.so' | head -1)
           test -n "$AAUDIO_LIB"
           echo "the AAudio library of the NDK is $AAUDIO_LIB"
+
+          # The backend asks for the library by name, so the name the job found
+          # and the name the backend uses have to be the same one.
+          grep -q "linkflags='-laaudio'" libs/backends/aaudio/wscript
+
           "$CLANG" -shared -o /tmp/libaaudio_device.so /tmp/aaudio_device.o "$AAUDIO_LIB"
           echo "the AAudio wrapper compiles and links against the NDK"
 
