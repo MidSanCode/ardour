@@ -1,0 +1,31 @@
+#!/usr/bin/env python
+import os
+
+I18N_PACKAGE = 'ardour-android'
+
+def options(opt):
+    pass
+
+def configure(conf):
+    pass
+
+def build(bld):
+    # The JNI bridge.  It is deliberately free of any Ardour dependency: it
+    # only needs the AAudio wrapper, so that it can be built (and checked)
+    # without the cross-compiled dependency stack of the engine.  When the
+    # engine state is added, this target grows a dependency on libardour.
+    obj = bld(features = 'cxx cxxshlib')
+    obj.source = [
+            'ardour_android.cc',
+            ]
+    obj.includes = ['.']
+    obj.name     = 'ardour_android'
+    obj.target   = 'ardour_android'
+    obj.use      = ['aaudio_device']
+    obj.install_path  = os.path.join(bld.env['LIBDIR'])
+    obj.defines = [
+            'ARDOUR_ANDROID_VERSION="' + bld.env.get('VERSION', 'unknown') + '"',
+            'ARDOUR_TARGET_OS="' + bld.env.get('TARGET_OS', 'unknown') + '"',
+            'ARDOUR_TARGET_ABI="' + bld.env.get('TARGET_ABI', 'unknown') + '"',
+            'ARDOUR_ANDROID_API=' + str (bld.env.get('ANDROID_API', 0)),
+            ]
