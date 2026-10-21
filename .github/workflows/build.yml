@@ -1021,11 +1021,12 @@ jobs:
         run: |
           set -eux
           # The wrapper is written against this API, so the API is part of the
-          # evidence of the job: the result codes and the three functions whose
+          # evidence of the job: the result codes and the functions whose
           # signature is not obvious are printed here.
-          HEADER="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include/aaudio/AAudio.h"
-          grep -n -A 40 'typedef enum aaudio_result' "$HEADER" | head -45
-          grep -n 'AAudio_convertResult\|AAudio_createStreamBuilder\|AAudioStreamBuilder_openStream' "$HEADER"
+          SYSDIR="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include/aaudio"
+          grep -n -A 40 'typedef enum aaudio_result' "$SYSDIR/AAudioTypes.h" | head -45
+          grep -n 'AAudio_convertResultToText\|AAudio_createStreamBuilder\|AAudioStreamBuilder_openStream' \
+            "$SYSDIR/AAudio.h"
 
       - name: Compile and link the AAudio wrapper against the NDK
         run: |
@@ -1048,7 +1049,7 @@ jobs:
           # The JNI bridge needs jni.h (from the NDK) and the AAudio wrapper.
           CLANGXX="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang++"
           test -x "$CLANGXX"
-          "$CLANGXX" -c -Wall -Wextra -O2 -fPIC \
+          "$CLANGXX" -c -Wall -Wextra -O2 -fPIC -std=c++17 \
             -I libs/android -I libs/backends/aaudio \
             -o /tmp/ardour_android.o \
             libs/android/ardour_android.cc

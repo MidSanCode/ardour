@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- The activity is an AppCompatActivity, so it needs an AppCompat
+         theme; without one the application crashes when it is started. -->
+    <style name="Theme.Ardour" parent="Theme.AppCompat.DayNight.NoActionBar" />
+</resources>

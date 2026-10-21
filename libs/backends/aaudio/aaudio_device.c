@@ -55,9 +55,10 @@ aa_device_open_common (int32_t sample_rate, int32_t channel_count, int32_t frame
 		return NULL;
 	}
 
-	AAudioStreamBuilder* builder = AAudio_createStreamBuilder (NULL);
+	AAudioStreamBuilder* builder = NULL;
+	aaudio_result_t builder_result = AAudio_createStreamBuilder (&builder);
 
-	if (builder == NULL) {
+	if (builder_result != AAUDIO_OK || builder == NULL) {
 		aa_device_set_error (device, "AAudio_createStreamBuilder() failed");
 		return device;
 	}
