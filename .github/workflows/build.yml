@@ -57,11 +57,21 @@
 #                     them.  The emcc step is *expected* to stop at the first
 #                     C++ dependency that has no wasm build yet, and asserts
 #                     that it stopped there and nowhere earlier.
-#   * android       : never run anywhere yet.  The AAudio wrapper was written
-#                     against the AAudio API as documented by the NDK; the first
-#                     run of this job is what proves that the API is used
-#                     correctly, that waf accepts the NDK toolchain, and that
-#                     the Gradle project is valid.  Expect findings.
+#   * android       : four rounds so far.  The first one failed in the
+#                     setup-android action: it installs the "tools" package by
+#                     default, and the SDK repository does not serve it any
+#                     more.  The second one got as far as the compile of the
+#                     AAudio wrapper and found four mismatches between the
+#                     wrapper and the AAudio API of the NDK (the stream
+#                     builder comes back through an out parameter, the opened
+#                     stream comes back through an out parameter and the
+#                     result is the return value, the result codes are
+#                     converted with AAudio_convertResultToText, and the
+#                     interrupted code is not part of the API of this NDK
+#                     version).  The third one found the last of them.  The
+#                     configure of the android target works in every round:
+#                     the NDK toolchain is selected, and the target decisions
+#                     are the Android ones.
 #
 # SELECTING TARGETS
 #   Manual only, by design: there is no push or pull_request trigger, because a
@@ -345,6 +355,24 @@ jobs:
       - name: Build
         run: ./waf -j"$(nproc)"
 
+      - name: Build message catalogues
+        run: |
+          set -eu
+          # The wscripts only *install* po/*.mo; the catalogues themselves are
+          # produced by msgfmt (upstream: `waf i18n` -> autowaf.build_i18n_mo in
+          # tools/autowaf.py).  A plain `./waf` never runs that, so without this
+          # step the build ships with no translation at all.
+          command -v msgfmt
+          for d in gtk2_ardour libs/ardour libs/gtkmm2ext libs/tk/ytk; do
+            ( cd "$d" && for p in po/*.po; do
+                # -f keeps fuzzy entries, exactly like upstream.  msgfmt's exit
+                # code is ignored upstream too: one bad .po must not fail the
+                # whole build.
+                msgfmt -c -f -o "${p%.po}.mo" "$p" || true
+              done )
+          done
+          ls -1 gtk2_ardour/po/*.mo | head -3
+
       - name: Install into a staging root
         run: ./waf install --destdir="$PWD/install-root"
 
@@ -377,7 +405,7 @@ jobs:
             libsndfile libsamplerate fftw taglib \
             serd sord sratom lilv lv2 \
             rubberband aubio libarchive liblo libusb libxml2 flac libogg \
-            boost curl jack
+            boost curl jack gettext
 
       - name: Point the compiler, linker and pkg-config at Homebrew
         run: |
@@ -418,6 +446,10 @@ jobs:
             echo "CPPFLAGS=$cpp"
             echo "LDFLAGS=$ld"
           } >> "$GITHUB_ENV"
+
+          # gettext is keg-only, so msgfmt (which builds the .mo catalogues) is
+          # not on the default PATH.
+          echo "$(brew --prefix gettext)/bin" >> "$GITHUB_PATH"
 
           echo "PKG_CONFIG_PATH=${pcp#:}"
           echo "CPPFLAGS=$cpp"
@@ -537,6 +569,24 @@ jobs:
       - name: Build
         run: ./waf -j"$(sysctl -n hw.ncpu)"
 
+      - name: Build message catalogues
+        run: |
+          set -eu
+          # The wscripts only *install* po/*.mo; the catalogues themselves are
+          # produced by msgfmt (upstream: `waf i18n` -> autowaf.build_i18n_mo in
+          # tools/autowaf.py).  A plain `./waf` never runs that, so without this
+          # step the build ships with no translation at all.
+          command -v msgfmt
+          for d in gtk2_ardour libs/ardour libs/gtkmm2ext libs/tk/ytk; do
+            ( cd "$d" && for p in po/*.po; do
+                # -f keeps fuzzy entries, exactly like upstream.  msgfmt's exit
+                # code is ignored upstream too: one bad .po must not fail the
+                # whole build.
+                msgfmt -c -f -o "${p%.po}.mo" "$p" || true
+              done )
+          done
+          ls -1 gtk2_ardour/po/*.mo | head -3
+
       - name: Install into a staging root
         run: ./waf install --destdir="$PWD/install-root"
 
@@ -596,6 +646,7 @@ jobs:
             mingw-w64-x86_64-libwebsockets
             mingw-w64-x86_64-cmake
             mingw-w64-x86_64-libusb
+            gettext
 
       - name: Build single-precision FFTW
         run: |
@@ -659,8 +710,43 @@ jobs:
       - name: Build
         run: python3 waf -j"$(nproc)"
 
+      - name: Build message catalogues
+        run: |
+          set -eu
+          # The wscripts only *install* po/*.mo; the catalogues themselves are
+          # produced by msgfmt (upstream: `waf i18n` -> autowaf.build_i18n_mo in
+          # tools/autowaf.py).  A plain `./waf` never runs that, so without this
+          # step the build ships with no translation at all.
+          # msgfmt comes from the MSYS2 `gettext` package.
+          command -v msgfmt
+          for d in gtk2_ardour libs/ardour libs/gtkmm2ext libs/tk/ytk; do
+            ( cd "$d" && for p in po/*.po; do
+                # -f keeps fuzzy entries, exactly like upstream.  msgfmt's exit
+                # code is ignored upstream too: one bad .po must not fail the
+                # whole build.
+                msgfmt -c -f -o "${p%.po}.mo" "$p" || true
+              done )
+          done
+          ls -1 gtk2_ardour/po/*.mo | head -3
+
       - name: Install
         run: python3 waf install
+
+      - name: Put the catalogues where the Windows binary looks for them
+        run: |
+          set -eux
+          # On Windows the runtime derives its locale directory from the
+          # *executable* location (bundle_env_mingw.cc: windows_search_path() +
+          # "\locale"), i.e. <prefix>/lib/ardour9/share/ardour9/locale - not
+          # from ARDOUR_DATA_PATH and not from the install prefix.  `waf
+          # install` puts them in <prefix>/share/ardour9/locale, so copy them
+          # to the path the binary actually reads.
+          src=ardour-install/share/ardour9/locale
+          dst=ardour-install/lib/ardour9/share/ardour9/locale
+          test -d "$src"
+          mkdir -p "$dst"
+          cp -r "$src/." "$dst/"
+          ls -1 "$dst"
 
       - name: Smoke test the binary
         run: |
@@ -670,6 +756,8 @@ jobs:
           EXE="$(ls ardour-install/lib/ardour9/ardour-[0-9]*.exe | head -1)"
           test -n "$EXE"
           ARDOUR_DATA_PATH="$PWD/ardour-install/share/ardour9" "$EXE" --version
+          # The catalogue must be where the runtime looks for it.
+          test -f ardour-install/lib/ardour9/share/ardour9/locale/zh/LC_MESSAGES/gtk2_ardour9.mo
 
       - name: Upload artefact
         uses: actions/upload-artifact@v4
@@ -1024,7 +1112,7 @@ jobs:
           # evidence of the job: the result codes and the functions whose
           # signature is not obvious are printed here.
           SYSDIR="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include/aaudio"
-          grep -n -A 40 'typedef enum aaudio_result' "$SYSDIR/AAudioTypes.h" | head -45
+          grep -n 'AAUDIO_OK\|AAUDIO_ERROR' "$SYSDIR/AAudioTypes.h" | head -30
           grep -n 'AAudio_convertResultToText\|AAudio_createStreamBuilder\|AAudioStreamBuilder_openStream' \
             "$SYSDIR/AAudio.h"
 
@@ -1040,7 +1128,13 @@ jobs:
             -I libs/backends/aaudio \
             -o /tmp/aaudio_device.o \
             libs/backends/aaudio/aaudio_device.c
-          "$CLANG" -shared -o /tmp/libaaudio_device.so /tmp/aaudio_device.o -laudio
+          # The library is linked by its path, so that the job does not depend
+          # on the spelling of its name; the name is printed as well.
+          AAUDIO_LIB=$(find "$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android" \
+                          -iname 'libaaudio.so' | head -1)
+          test -n "$AAUDIO_LIB"
+          echo "the AAudio library of the NDK is $AAUDIO_LIB"
+          "$CLANG" -shared -o /tmp/libaaudio_device.so /tmp/aaudio_device.o "$AAUDIO_LIB"
           echo "the AAudio wrapper compiles and links against the NDK"
 
       - name: Compile the JNI bridge against the NDK

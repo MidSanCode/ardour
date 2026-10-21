@@ -38,6 +38,13 @@ using namespace ARDOUR;
 
 static std::string s_instance_name;
 
+/* the DSP load is measured with the monotonic clock of glib */
+static int64_t
+_x_get_monotonic_usec ()
+{
+	return g_get_monotonic_time ();
+}
+
 /* ---------------------------------------------------------------------- */
 /* ports                                                                   */
 /* ---------------------------------------------------------------------- */
@@ -760,6 +767,9 @@ AAudioBackend::main_process_thread ()
 			capture_input (nframes);
 		}
 
+		_dsp_load_calc.set_max_time (_samplerate, nframes);
+		_dsp_load_calc.set_start_timestamp_us (_x_get_monotonic_usec ());
+
 		if (engine.process_callback (nframes)) {
 			break;
 		}
@@ -770,9 +780,6 @@ AAudioBackend::main_process_thread ()
 			render_output (nframes);
 		}
 
-		/* dsp load */
-		_dsp_load_calc.set_max_time (_samplerate, nframes);
-		_dsp_load_calc.set_start_timestamp_us (_x_get_monotonic_usec ());
 		_dsp_load_calc.set_stop_timestamp_us (_x_get_monotonic_usec ());
 		_dsp_load = _dsp_load_calc.get_dsp_load_unbound ();
 	}
