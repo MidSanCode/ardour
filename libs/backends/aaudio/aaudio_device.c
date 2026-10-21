@@ -55,7 +55,7 @@ aa_device_open_common (int32_t sample_rate, int32_t channel_count, int32_t frame
 		return NULL;
 	}
 
-	AAudioStreamBuilder* builder = AAudio_createStreamBuilder ();
+	AAudioStreamBuilder* builder = AAudio_createStreamBuilder (NULL);
 
 	if (builder == NULL) {
 		aa_device_set_error (device, "AAudio_createStreamBuilder() failed");
@@ -77,12 +77,13 @@ aa_device_open_common (int32_t sample_rate, int32_t channel_count, int32_t frame
 	(void) frames_per_burst;
 
 	aaudio_result_t result = AAUDIO_OK;
-	AAudioStream* stream = AAudioStreamBuilder_openStream (builder, &result);
+	AAudioStream* stream = NULL;
+	result = AAudioStreamBuilder_openStream (builder, &stream);
 
 	AAudioStreamBuilder_delete (builder);
 
-	if (stream == NULL) {
-		aa_device_set_error (device, AAudio_convert_result_to_text (result));
+	if (result != AAUDIO_OK || stream == NULL) {
+		aa_device_set_error (device, AAudio_convertResultToText (result));
 		return device;
 	}
 
@@ -130,7 +131,7 @@ aa_device_start (AAudioDevice* device)
 	aaudio_result_t result = AAudioStream_requestStart (device->stream);
 
 	if (result != AAUDIO_OK) {
-		aa_device_set_error (device, AAudio_convert_result_to_text (result));
+		aa_device_set_error (device, AAudio_convertResultToText (result));
 		return AAUDIO_DEVICE_ERROR;
 	}
 	return AAUDIO_DEVICE_OK;
@@ -145,7 +146,7 @@ aa_device_stop (AAudioDevice* device)
 	aaudio_result_t result = AAudioStream_requestStop (device->stream);
 
 	if (result != AAUDIO_OK) {
-		aa_device_set_error (device, AAudio_convert_result_to_text (result));
+		aa_device_set_error (device, AAudio_convertResultToText (result));
 		return AAUDIO_DEVICE_ERROR;
 	}
 	return AAUDIO_DEVICE_OK;
@@ -158,13 +159,10 @@ aa_device_map_error (AAudioDevice* device, aaudio_result_t result)
 	case AAUDIO_ERROR_DISCONNECTED:
 		aa_device_set_error (device, "stream disconnected (the device was taken away)");
 		return AAUDIO_DEVICE_DISCONNECTED;
-	case AAUDIO_ERROR_INTERRUPTED:
-		aa_device_set_error (device, "stream interrupted");
-		return AAUDIO_DEVICE_INTERRUPTED;
 	default:
 		/* the text of the AAudio result is more informative than any
 		 * mapping of it onto the status codes of this wrapper */
-		aa_device_set_error (device, AAudio_convert_result_to_text (result));
+		aa_device_set_error (device, AAudio_convertResultToText (result));
 		return AAUDIO_DEVICE_ERROR;
 	}
 }

@@ -159,7 +159,7 @@ class AAudioBackend : public AudioBackend, public PortEngineSharedImpl
 		int         disconnect (const std::string& src, const std::string& dst) { return PortEngineSharedImpl::disconnect (src, dst); }
 		int         connect (PortEngine::PortHandle ph, const std::string& other) { return PortEngineSharedImpl::connect (ph, other); }
 		int         disconnect (PortEngine::PortHandle ph, const std::string& other) { return PortEngineSharedImpl::disconnect (ph, other); }
-		void        disconnect_all (PortEngine::PortHandle ph) { PortEngineSharedImpl::disconnect_all (ph); }
+		int         disconnect_all (PortEngine::PortHandle ph) { return PortEngineSharedImpl::disconnect_all (ph); }
 		bool        connected (PortEngine::PortHandle ph, bool process_callback_safe) { return PortEngineSharedImpl::connected (ph, process_callback_safe); }
 		bool        connected_to (PortEngine::PortHandle ph, const std::string& other, bool process_callback_safe) { return PortEngineSharedImpl::connected_to (ph, other, process_callback_safe); }
 		bool        physically_connected (PortEngine::PortHandle ph, bool process_callback_safe) { return PortEngineSharedImpl::physically_connected (ph, process_callback_safe); }
@@ -241,8 +241,8 @@ class AAudioBackend : public AudioBackend, public PortEngineSharedImpl
 		AAudioDevice* _input_device;
 		std::vector<float> _output_buffer;
 		std::vector<float> _input_buffer;
-		std::vector<AAudioAudioPort*> _system_inputs;
-		std::vector<AAudioAudioPort*> _system_outputs;
+		std::vector<BackendPortPtr> _system_inputs;
+		std::vector<BackendPortPtr> _system_outputs;
 
 		/* port engine */
 		int register_system_ports ();

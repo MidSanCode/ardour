@@ -442,15 +442,30 @@ AAudioBackend::monitoring_input (PortHandle)
 }
 
 void
-AAudioBackend::set_latency_range (PortHandle ph, bool for_playback, LatencyRange r)
+AAudioBackend::set_latency_range (PortEngine::PortHandle port_handle, bool for_playback, LatencyRange latency_range)
 {
-	PortEngineSharedImpl::set_latency_range (ph, for_playback, r);
+	BackendPortPtr port = std::dynamic_pointer_cast<BackendPort> (port_handle);
+
+	if (!valid_port (port)) {
+		return;
+	}
+
+	port->set_latency_range (latency_range, for_playback);
 }
 
 LatencyRange
-AAudioBackend::get_latency_range (PortHandle ph, bool for_playback)
+AAudioBackend::get_latency_range (PortEngine::PortHandle port_handle, bool for_playback)
 {
-	return PortEngineSharedImpl::get_latency_range (ph, for_playback);
+	LatencyRange r;
+	BackendPortPtr port = std::dynamic_pointer_cast<BackendPort> (port_handle);
+
+	if (!valid_port (port)) {
+		r.min = 0;
+		r.max = 0;
+		return r;
+	}
+
+	return port->latency_range (for_playback);
 }
 
 void*
@@ -473,16 +488,13 @@ AAudioBackend::register_system_ports ()
 	for (uint32_t i = 1; i <= _n_inputs; ++i) {
 		char tmp[64];
 		snprintf (tmp, sizeof (tmp), "system:capture_%u", i);
-		PortPtr p = add_port (std::string (tmp), DataType::AUDIO,
+		BackendPortPtr p = add_port (std::string (tmp), DataType::AUDIO,
 				static_cast<PortFlags> (IsOutput | IsPhysical | IsTerminal));
 		if (!p) {
 			return -1;
 		}
 		set_latency_range (p, false, lr);
-		AAudioAudioPort* ap = dynamic_cast<AAudioAudioPort*> (p.get ());
-		if (ap) {
-			_system_inputs.push_back (ap);
-		}
+		_system_inputs.push_back (p);
 	}
 
 	/* playback ports: an output of the engine is an input of the device */
@@ -491,16 +503,13 @@ AAudioBackend::register_system_ports ()
 	for (uint32_t i = 1; i <= _n_outputs; ++i) {
 		char tmp[64];
 		snprintf (tmp, sizeof (tmp), "system:playback_%u", i);
-		PortPtr p = add_port (std::string (tmp), DataType::AUDIO,
+		BackendPortPtr p = add_port (std::string (tmp), DataType::AUDIO,
 				static_cast<PortFlags> (IsInput | IsPhysical | IsTerminal));
 		if (!p) {
 			return -1;
 		}
 		set_latency_range (p, true, lr);
-		AAudioAudioPort* ap = dynamic_cast<AAudioAudioPort*> (p.get ());
-		if (ap) {
-			_system_outputs.push_back (ap);
-		}
+		_system_outputs.push_back (p);
 	}
 
 	return 0;
@@ -672,7 +681,7 @@ AAudioBackend::capture_input (pframes_t nframes)
 
 	/* the device data is interleaved, the port buffers are not */
 	for (uint32_t c = 0; c < channels && c < _system_inputs.size (); ++c) {
-		Sample* buf = (Sample*) _system_inputs[c]->get_buffer (nframes);
+		Sample* buf = (Sample*) get_buffer (_system_inputs[c], nframes);
 		if (!buf) {
 			continue;
 		}
@@ -694,7 +703,7 @@ AAudioBackend::render_output (pframes_t nframes)
 	memset (_output_buffer.data (), 0, sizeof (float) * nframes * channels);
 
 	for (uint32_t c = 0; c < channels && c < _system_outputs.size (); ++c) {
-		Sample* buf = (Sample*) _system_outputs[c]->get_buffer (nframes);
+		Sample* buf = (Sample*) get_buffer (_system_outputs[c], nframes);
 		if (!buf) {
 			continue;
 		}

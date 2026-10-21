@@ -1017,6 +1017,16 @@ jobs:
             echo "the android configure completed: the dependency stack resolves now"
           fi
 
+      - name: Show the AAudio API of the installed NDK
+        run: |
+          set -eux
+          # The wrapper is written against this API, so the API is part of the
+          # evidence of the job: the result codes and the three functions whose
+          # signature is not obvious are printed here.
+          HEADER="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include/aaudio/AAudio.h"
+          grep -n -A 40 'typedef enum aaudio_result' "$HEADER" | head -45
+          grep -n 'AAudio_convertResult\|AAudio_createStreamBuilder\|AAudioStreamBuilder_openStream' "$HEADER"
+
       - name: Compile and link the AAudio wrapper against the NDK
         run: |
           set -eux
