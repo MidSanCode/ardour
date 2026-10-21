@@ -7,7 +7,7 @@
 #     (the PortAudio backend needs a PortAudio built with the Steinberg ASIO
 #      SDK, so it is left disabled here - see the Windows job below)
 #
-# Two further jobs do not add platform coverage.  They pin structural
+# Three further jobs do not add platform coverage.  They pin structural
 # invariants of the portable/mobile work, so that a later change cannot quietly
 # undo them:
 #   * headless-tkless - configures AND builds the engine with --no-tk-stack
@@ -19,6 +19,11 @@
 #     target selection (flags, dlopen probe, backend choice).  Cross-compiling
 #     the C++ dependency stack to wasm is stage-1 work, so this job asserts the
 #     target-branch decisions instead of a successful build.
+#   * android         - the Android target: the NDK toolchain has to be
+#     accepted by waf and the target decisions have to be the Android ones, the
+#     AAudio wrapper and the JNI bridge have to compile against the NDK, and
+#     the application shell has to assemble.  The cross-compiled dependency
+#     stack does not exist yet, so the configure half asserts where it stops.
 #
 # VERIFICATION STATUS
 #   * windows-msys2 : reproduces a recipe that was actually run end to end on a
@@ -52,10 +57,15 @@
 #                     them.  The emcc step is *expected* to stop at the first
 #                     C++ dependency that has no wasm build yet, and asserts
 #                     that it stopped there and nowhere earlier.
+#   * android       : never run anywhere yet.  The AAudio wrapper was written
+#                     against the AAudio API as documented by the NDK; the first
+#                     run of this job is what proves that the API is used
+#                     correctly, that waf accepts the NDK toolchain, and that
+#                     the Gradle project is valid.  Expect findings.
 #
 # SELECTING TARGETS
 #   Manual only, by design: there is no push or pull_request trigger, because a
-#   full run is five jobs and the optimised platform builds are hours long.
+#   full run is six jobs and the optimised platform builds are hours long.
 #   Actions -> Build -> Run workflow offers one checkbox per target, all ticked
 #   by default: untick what you do not need and only the remaining jobs are
 #   scheduled. The `selection` job always runs first and writes the chosen set
@@ -76,8 +86,8 @@ name: Build
 on:
   workflow_dispatch:
     inputs:
-      # The five targets are independent - tick only what you need. A dispatch
-      # of one target is the fast path; the full set is five jobs and the
+      # The six targets are independent - tick only what you need. A dispatch
+      # of one target is the fast path; the full set is six jobs and the
       # optimised platform builds can each take hours.
       linux:
         description: "Linux (x86_64)"
@@ -97,6 +107,10 @@ on:
         default: true
       wasm32:
         description: "Structural: wasm32 target selection (configure only)"
+        type: boolean
+        default: true
+      android:
+        description: "Structural: Android target (NDK toolchain, AAudio, app shell)"
         type: boolean
         default: true
       debug_build:
@@ -180,6 +194,7 @@ jobs:
           IN_WINDOWS: ${{ inputs.windows }}
           IN_HEADLESS_TKLESS: ${{ inputs.headless_tkless }}
           IN_WASM32: ${{ inputs.wasm32 }}
+          IN_ANDROID: ${{ inputs.android }}
         run: |
           echo "### Selected targets" >> "$GITHUB_STEP_SUMMARY"
           echo "| target | enabled |" >> "$GITHUB_STEP_SUMMARY"
@@ -189,7 +204,8 @@ jobs:
           for pair in "linux:$IN_LINUX" "macos:$IN_MACOS" \
                       "windows:$IN_WINDOWS" \
                       "headless-tkless:$IN_HEADLESS_TKLESS" \
-                      "wasm32:$IN_WASM32"; do
+                      "wasm32:$IN_WASM32" \
+                      "android:$IN_ANDROID"; do
             target="${pair%%:*}"; value="${pair#*:}"
             if [ "$value" = "true" ]; then
               row="| \`$target\` | yes |"; enabled=$((enabled + 1))
@@ -204,7 +220,7 @@ jobs:
             echo "::error::no target selected - this run would build nothing"
             exit 1
           fi
-          echo "$enabled of 5 targets selected"
+          echo "$enabled of 6 targets selected"
 
   # ---------------------------------------------------------------------------
   linux:
@@ -910,3 +926,122 @@ jobs:
             echo "configure completed under emcc: the wasm dependency stack resolves now"
             echo "-> tighten this job: the target decisions are no longer the only thing verified"
           fi
+
+  # ---------------------------------------------------------------------------
+  # Structural: the Android target.  Three checks, in increasing order of what
+  # they prove:
+  #   1. the NDK toolchain is accepted by waf, and the target decisions are the
+  #      Android ones.  There is no cross-compiled dependency stack for Android
+  #      yet, so the configure is expected to stop at the first dependency; the
+  #      job asserts *where* it stopped, not that it finished.
+  #   2. the AAudio wrapper and the JNI bridge really compile against the NDK:
+  #      neither has an Ardour dependency, so this is a complete compile of
+  #      real code against the real NDK headers and libraries.
+  #   3. the application shell (WebView + JS bridge) assembles.
+  android:
+    name: Android target (structural)
+    if: inputs.android
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install the Android SDK and the NDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install the NDK and the platform
+        run: |
+          set -eux
+          sdkmanager --install "ndk;26.1.10909125" "platforms;android-34" "build-tools;34.0.0"
+          echo "ANDROID_NDK_ROOT=$ANDROID_SDK_ROOT/ndk/26.1.10909125" >> "$GITHUB_ENV"
+
+      - name: Ensure a version is available to waf
+        run: |
+          if ! git describe HEAD >/dev/null 2>&1; then
+            echo "No tag reachable from HEAD; creating ${ARDOUR_FALLBACK_VERSION}"
+            git config user.email "ci@users.noreply.github.com"
+            git config user.name "Ardour CI"
+            git tag -a "${ARDOUR_FALLBACK_VERSION}" -m "CI fallback version" --no-sign
+          fi
+          git describe HEAD
+
+      - name: Configure for android (target selection)
+        run: |
+          set -euxo pipefail
+
+          set +e
+          ./waf configure --out=build-android \
+            --dist-target=android --with-ndk="$ANDROID_NDK_ROOT" --android-api=26 \
+            --with-frontends=none --no-tk-stack --with-backends=aaudio \
+            --no-execstack --no-dr-mingw 2>&1 | tee android-configure.log
+          STATUS=${PIPESTATUS[0]}
+          set -e
+
+          # The NDK's clang must be the compiler that was selected: waf has no
+          # android tool, so the clang tool is used with a CC override.
+          grep -q 'aarch64-linux-android26-clang' android-configure.log
+
+          # ...and the target decisions must be the Android ones.
+          grep -q 'Android target: ABI aarch64, NDK .*, API level 26, backends: aaudio, dummy' \
+            android-configure.log
+
+          # The configure must have stopped at a dependency, not earlier: the
+          # cross-compiled dependency stack is not built yet.
+          if [ "$STATUS" -ne 0 ]; then
+            if grep -qE 'Checking for (boost|glib-2\.0|glibmm)|boost library' android-configure.log; then
+              echo "configure stopped at a dependency that has no Android build yet:"
+              grep -E 'Checking for (boost|glib-2\.0|glibmm)|boost library' android-configure.log | tail -3
+            else
+              echo "::error::the android configure failed before it reached dependency detection"
+              tail -40 android-configure.log
+              exit 1
+            fi
+          else
+            echo "the android configure completed: the dependency stack resolves now"
+          fi
+
+      - name: Compile and link the AAudio wrapper against the NDK
+        run: |
+          set -eux
+          # The AAudio wrapper has no Ardour dependency, so it can be built on
+          # its own: this is a complete compile of real code against the real
+          # NDK headers and libraries.
+          CLANG="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang"
+          test -x "$CLANG"
+          "$CLANG" -c -Wall -Wextra -O2 -fPIC \
+            -I libs/backends/aaudio \
+            -o /tmp/aaudio_device.o \
+            libs/backends/aaudio/aaudio_device.c
+          "$CLANG" -shared -o /tmp/libaaudio_device.so /tmp/aaudio_device.o -laudio
+          echo "the AAudio wrapper compiles and links against the NDK"
+
+      - name: Compile the JNI bridge against the NDK
+        run: |
+          set -eux
+          # The JNI bridge needs jni.h (from the NDK) and the AAudio wrapper.
+          CLANGXX="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang++"
+          test -x "$CLANGXX"
+          "$CLANGXX" -c -Wall -Wextra -O2 -fPIC \
+            -I libs/android -I libs/backends/aaudio \
+            -o /tmp/ardour_android.o \
+            libs/android/ardour_android.cc
+          echo "the JNI bridge compiles against the NDK"
+
+      - name: Build the application shell
+        run: |
+          set -eux
+          # The gradle wrapper jar is a binary and is not committed, so a
+          # pinned distribution is used instead.
+          GRADLE_VERSION=8.7
+          curl -fsSL -o /tmp/gradle.zip "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip"
+          unzip -q /tmp/gradle.zip -d /opt
+          cd android
+          /opt/gradle-${GRADLE_VERSION}/bin/gradle --no-daemon assembleDebug
+          ls -l app/build/outputs/apk/debug/

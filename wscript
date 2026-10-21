@@ -371,6 +371,7 @@ children = [
         'libs/evoral',
         'libs/ctrl-interface',
         'libs/surfaces',
+        'libs/android',                    # the JNI bridge (Android target only)
         'libs/panners',
         'libs/backends',
         'libs/temporal',
@@ -439,6 +440,20 @@ DIST_TARGET_OS = {
         'mingw':  'windows',
         'msvc':   'windows',
         'wasm32': 'wasm',
+        'android': 'android',
+        }
+
+# Android ABI names (the NDK/gradle spelling) mapped onto the ABI names used
+# by the rest of the build system
+ANDROID_ABIS = {
+        'arm64-v8a':   'aarch64',
+        'arm64':       'aarch64',
+        'aarch64':     'aarch64',
+        'armeabi-v7a': 'armhf',
+        'armeabi':     'armhf',
+        'armhf':       'armhf',
+        'x86_64':      'x86_64',
+        'x86':         'i386',
         }
 
 # target ABIs that are members of the x86 family (see target_is_x86 in
@@ -516,7 +531,13 @@ def resolve_target (conf, platform, dist_target):
                 tgt = DIST_TARGET_OS[dist_target]
                 if tgt == 'wasm':
                         return 'wasm', 'wasm32'
+                if tgt == 'android':
+                        return 'android', android_abi (dist_target)
                 return tgt, cc_abi (conf)
+
+        if dist_target.startswith ('android-'):
+                # e.g. --dist-target=android-arm64-v8a
+                return 'android', android_abi (dist_target)
 
         tgt = host_os (platform)
         if tgt == 'macos':
@@ -526,6 +547,61 @@ def resolve_target (conf, platform, dist_target):
                 return tgt, cc_abi (conf)
         # an explicit ABI/codename dist-target
         return tgt, dist_target
+
+def android_abi (dist_target):
+        """The ABI of an Android build.
+
+        Taken from --dist-target=android-<abi>, then from ANDROID_ABI (the
+        variable gradle uses), and finally aarch64: the compiler is not
+        configured yet at this point, so it cannot be asked.
+        """
+        if dist_target.startswith ('android-'):
+                abi = ANDROID_ABIS.get (dist_target[len ('android-'):])
+                if abi is not None:
+                        return abi
+        abi = ANDROID_ABIS.get (os.environ.get ('ANDROID_ABI', ''))
+        if abi is not None:
+                return abi
+        return 'aarch64'
+
+def ndk_prebuilt_tag ():
+        """Name of the NDK's prebuilt LLVM toolchain directory for this host."""
+        if sys.platform.startswith ('darwin'):
+                return 'darwin-x86_64'
+        if os.name == 'nt' or sys.platform.startswith ('win'):
+                return 'windows-x86_64'
+        return 'linux-x86_64'
+
+def find_ndk (opts):
+        """Locate the Android NDK: --with-ndk, then ANDROID_NDK_ROOT/HOME/NDK."""
+        candidates = []
+        if getattr (opts, 'with_ndk', ''):
+                candidates.append (opts.with_ndk)
+        for var in ('ANDROID_NDK_ROOT', 'ANDROID_NDK_HOME', 'ANDROID_NDK'):
+                v = os.environ.get (var)
+                if v:
+                        candidates.append (v)
+        for c in candidates:
+                if c and os.path.isdir (os.path.join (c, 'toolchains', 'llvm', 'prebuilt')):
+                        return os.path.abspath (c)
+        return None
+
+def ndk_toolchain (ndk, abi, api):
+        """(cc, cxx) of the NDK's clang wrappers for one ABI and API level.
+
+        NDK r19 and later ship per-API-level clang wrappers
+        (aarch64-linux-android26-clang) that know the sysroot and the target
+        triple themselves, so no extra --target/--sysroot flags are needed.
+        """
+        triple = {
+                'aarch64': 'aarch64-linux-android',
+                'armhf':   'armv7a-linux-androideabi',
+                'x86_64':  'x86_64-linux-android',
+                'i386':    'i686-linux-android',
+                }.get (abi, 'aarch64-linux-android')
+        bindir = os.path.join (ndk, 'toolchains', 'llvm', 'prebuilt', ndk_prebuilt_tag (), 'bin')
+        return (os.path.join (bindir, '%s%d-clang' % (triple, api)),
+                os.path.join (bindir, '%s%d-clang++' % (triple, api)))
 
 def select_children (env, what = 'build'):
         """The children to recurse into, honouring --with-frontends/--no-tk-stack.
@@ -543,6 +619,8 @@ def select_children (env, what = 'build'):
                 if i in TK_CHILDREN and not with_tk:
                         continue
                 if i == 'libs/surfaces' and not with_surfaces:
+                        continue
+                if i == 'libs/android' and env.get('TARGET_OS', '') != 'android':
                         continue
                 if i in FRONTEND_CHILDREN:
                         if want != 'all' and not FRONTEND_CHILDREN[i] in want:
@@ -675,6 +753,11 @@ int main() { return 0; }''',
                 conf.env['build_target'] = 'none'
     else:
         conf.env['build_target'] = opt.dist_target
+
+    if conf.env['TARGET_OS'] == 'android':
+        # the ABI, not the word "android", selects the architecture specific
+        # sources and the FPU options
+        conf.env['build_target'] = conf.env['TARGET_ABI']
 
     # NOTE: target_os/target_abi (and the frontend selection) are resolved early
     # in configure(), because the dependency checks there need them; build_target
@@ -985,7 +1068,7 @@ def options(opt):
     opt.add_option('--arch', type='string', action='store', dest='arch',
                     help='Architecture-specific compiler FLAGS')
     opt.add_option('--with-backends', type='string', action='store', default='', dest='with_backends',
-                    help='Specify which backend modules are to be included(jack,alsa,portaudio,coreaudio,pulseaudio)')
+                    help='Specify which backend modules are to be included(jack,alsa,portaudio,coreaudio,pulseaudio,aaudio)')
     opt.add_option('--backtrace', action='store_true', default=False, dest='backtrace',
                     help='Compile with -rdynamic -- allow obtaining backtraces from within Ardour')
     opt.add_option('--no-carbon', action='store_true', default=False, dest='nocarbon',
@@ -999,7 +1082,11 @@ def options(opt):
     opt.add_option('--depstack-root', type='string', default='~', dest='depstack_root',
                     help='Directory/folder where dependency stack trees (gtk, a3) can be found (defaults to ~)')
     opt.add_option('--dist-target', type='string', default='auto', dest='dist_target',
-                    help='Specify the target for cross-compiling [auto,none,x86,i386,i686,x86_64,tiger,leopard,mingw,msvc,wasm32]')
+                    help='Specify the target for cross-compiling [auto,none,x86,i386,i686,x86_64,tiger,leopard,mingw,msvc,wasm32,android,android-arm64-v8a]')
+    opt.add_option('--with-ndk', type='string', action='store', default='', dest='with_ndk',
+                    help='Path to the Android NDK (required for --dist-target=android; ANDROID_NDK_ROOT is used if unset)')
+    opt.add_option('--android-api', type='int', action='store', default=26, dest='android_api',
+                    help='Android API level to build against (default 26, the first release with AAudio)')
     opt.add_option('--with-frontends', type='string', action='store', default='all', dest='with_frontends',
                     help='Which frontends to build: all (default), or a comma-separated list of gtk,headless,lua,utils, or none')
     opt.add_option('--no-tk-stack', action='store_true', default=False, dest='no_tk_stack',
@@ -1114,6 +1201,28 @@ def sub_config_and_use(conf, name, has_objects = True):
 
 def configure(conf):
     set_version ()
+
+    # An Android build needs the NDK's clang, and waf 2.0.26 has no android
+    # tool: the clang tool is selected through --check-c-compiler and the
+    # compiler through CC/CXX, and both have to be in place before the
+    # compiler tools are loaded below.
+    if Options.options.dist_target == 'android' or Options.options.dist_target.startswith ('android-'):
+            ndk = find_ndk (Options.options)
+            if ndk is None:
+                    conf.fatal ("--dist-target=android needs the Android NDK: pass --with-ndk=<path> or set ANDROID_NDK_ROOT")
+            abi = android_abi (Options.options.dist_target)
+            cc, cxx = ndk_toolchain (ndk, abi, Options.options.android_api)
+            for p in (cc, cxx):
+                    if not os.path.isfile (p):
+                            conf.fatal ("Android NDK toolchain not found: %s (NDK r19 or later is required)" % p)
+            Options.options.check_c_compiler = 'clang'
+            Options.options.check_cxx_compiler = 'clang++'
+            conf.env['CC'] = [cc]
+            conf.env['CXX'] = [cxx]
+            conf.env['ANDROID_NDK'] = ndk
+            conf.env['ANDROID_API'] = Options.options.android_api
+            conf.define ('PLATFORM_ANDROID', 1)
+
     conf.load('compiler_c')
     conf.load('compiler_cxx')
     if Options.options.dist_target == 'mingw':
@@ -1213,15 +1322,37 @@ def configure(conf):
     # keeps the toolkit-free ones, e.g. the websockets control protocol).
     conf.env['WITH_SURFACES'] = not Options.options.no_surfaces
 
+    if conf.env['TARGET_OS'] == 'android':
+            # There is no Android port of the bundled toolkit (ydk/ydk), and the
+            # Android UI is a WebView talking to the engine over JNI, so an
+            # Android build never has the GTK stack and never has the GTK
+            # frontend.  'all' is rewritten to 'none' rather than rejected:
+            # the toolkit is not unavailable there, it is simply not part of
+            # an Android build.
+            conf.env['WITH_TK_STACK'] = False
+            if conf.env['WITH_FRONTENDS'] == 'all':
+                    conf.env['WITH_FRONTENDS'] = 'none'
+
     valid_frontends = ['gtk', 'headless', 'lua', 'utils']
     if conf.env['WITH_FRONTENDS'] not in ('all', 'none'):
         for f in conf.env['WITH_FRONTENDS'].split(','):
             if f not in valid_frontends:
                 conf.fatal("--with-frontends: unknown frontend '%s' (known: all, none, %s)" % (f, ', '.join (valid_frontends)))
         if 'gtk' in conf.env['WITH_FRONTENDS'].split(',') and not conf.env['WITH_TK_STACK']:
+            if conf.env['TARGET_OS'] == 'android':
+                conf.fatal("--with-frontends=gtk is not available for an Android target (there is no ydk/ydk port): use --with-frontends=none,headless")
             conf.fatal("--with-frontends=gtk needs the bundled toolkit: drop --no-tk-stack, or pick another frontend")
 
     autowaf.display_msg (conf, 'Building for', '%s / %s' % (conf.env['TARGET_OS'], conf.env['TARGET_ABI']))
+    if conf.env['TARGET_OS'] == 'android':
+            autowaf.display_msg (conf, 'Android NDK', conf.env['ANDROID_NDK'])
+            autowaf.display_msg (conf, 'Android API level', str (conf.env['ANDROID_API']))
+            # printed early (and not only into the configuration summary): the
+            # configure of an Android build stops at the first dependency that
+            # has no cross-compiled version yet, and the target decisions have
+            # to be visible in the log at that point.
+            print ('Android target: ABI %s, NDK %s, API level %d, backends: aaudio, dummy'
+                   % (conf.env['TARGET_ABI'], conf.env['ANDROID_NDK'], conf.env['ANDROID_API']))
     autowaf.display_msg (conf, 'Bundled GTK toolkit', 'yes' if conf.env['WITH_TK_STACK'] else 'no')
     autowaf.display_msg (conf, 'Frontends', conf.env['WITH_FRONTENDS'])
     if not conf.env['WITH_TK_STACK']:
@@ -1567,15 +1698,16 @@ int main () { __int128 x = 0; return 0; }
         else:
             conf.env['WINDOWS_VST_SUPPORT'] = False
     if not opts.no_lxvst:
-        if conf.env['TARGET_OS'] in ('windows', 'macos', 'wasm'):
+        if conf.env['TARGET_OS'] in ('windows', 'macos', 'wasm', 'android'):
             # LinuxVST is a Linux binary-plugin format: there is nothing to host
-            # on Windows/macOS (which have their own hosters) nor on wasm
+            # on Windows/macOS (which have their own hosters), none on wasm, and
+            # none on Android, where third party plugin hosting is not allowed
             conf.env['LXVST_SUPPORT'] = False
         else:
             conf.define('LXVST_SUPPORT', 1)
             conf.env['LXVST_SUPPORT'] = True
     if not opts.no_vst3:
-        if conf.env['TARGET_OS'] == 'wasm':
+        if conf.env['TARGET_OS'] in ('wasm', 'android'):
             # VST3 hosting needs dynamic loading and filesystem plugin scanning
             conf.env['VST3_SUPPORT'] = False
         else:
@@ -1614,7 +1746,7 @@ int main () { __int128 x = 0; return 0; }
     if backends == ['']:
         backends = ['dummy']
 
-        if conf.env['TARGET_OS'] != 'wasm':
+        if conf.env['TARGET_OS'] not in ('wasm', 'android'):
             autowaf.check_pkg(conf, 'jack', uselib_store='JACK', atleast_version='1.9.10', mandatory=False)
             if conf.is_defined('HAVE_JACK'):
                 backends += ['jack']
@@ -1627,6 +1759,8 @@ int main () { __int128 x = 0; return 0; }
             backends += ['coreaudio']
         if conf.env['TARGET_OS'] == 'windows':
             backends += ['portaudio']
+        if conf.env['TARGET_OS'] == 'android':
+            backends += ['aaudio']
 
     if 'dummy' not in backends:
         backends += ['dummy']
@@ -1638,6 +1772,7 @@ int main () { __int128 x = 0; return 0; }
     conf.env['BUILD_PABACKEND'] = any('portaudio' in b for b in backends)
     conf.env['BUILD_CORECRAPPITA'] = any('coreaudio' in b for b in backends)
     conf.env['BUILD_PULSEAUDIO'] = any('pulseaudio' in b for b in backends)
+    conf.env['BUILD_AAUDIOBACKEND'] = any('aaudio' in b for b in backends)
 
     if backends == [''] or not (
                conf.env['BUILD_JACKBACKEND']
@@ -1645,7 +1780,8 @@ int main () { __int128 x = 0; return 0; }
             or conf.env['BUILD_DUMMYBACKEND']
             or conf.env['BUILD_PABACKEND']
             or conf.env['BUILD_CORECRAPPITA']
-            or conf.env['BUILD_PULSEAUDIO']):
+            or conf.env['BUILD_PULSEAUDIO']
+            or conf.env['BUILD_AAUDIOBACKEND']):
         conf.fatal("Must configure and build at least one backend")
 
     if (Options.options.use_lld):
@@ -1666,6 +1802,13 @@ int main () { __int128 x = 0; return 0; }
         if unsupported_backends:
             conf.fatal("backends not available for wasm32 (only dummy): %s" % ', '.join (unsupported_backends))
 
+    if conf.env['TARGET_OS'] == 'android':
+        # Android has exactly one native audio API (AAudio); the desktop
+        # backends have no Android implementation.
+        unsupported_backends = [b for b in backends if b not in ('aaudio', 'dummy')]
+        if unsupported_backends:
+            conf.fatal("backends not available for android (only aaudio, dummy): %s" % ', '.join (unsupported_backends))
+
     if conf.env['TARGET_OS'] == 'linux' and conf.env['BUILD_PABACKEND']:
         conf.fatal("PortAudio Backend is not for Linux")
 
@@ -1677,6 +1820,9 @@ int main () { __int128 x = 0; return 0; }
 
     if conf.env['TARGET_OS'] != 'linux' and conf.env['BUILD_PULSEAUDIO']:
         conf.fatal("PulseAudio Backend is only available on Linux")
+
+    if conf.env['TARGET_OS'] != 'android' and conf.env['BUILD_AAUDIOBACKEND']:
+        conf.fatal("AAudio Backend is only available on Android")
 
     if conf.env['BUILD_PULSEAUDIO'] and not conf.is_defined('HAVE_PULSEAUDIO'):
         conf.fatal("PulseAudio Backend requires libpulse-dev")
