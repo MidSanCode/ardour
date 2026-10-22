@@ -1958,6 +1958,18 @@ const char* const ardour_config_info = "\\n\\
     if Options.options.dist_target == 'mingw' or Options.options.dist_target == 'msvc':
         create_resource_file(Options.options.program_name)
 
+# Android has no versioned sonames: the dynamic linker looks a DT_NEEDED entry
+# up by its exact name in the application's library directory, and an APK can
+# only carry files called lib<name>.so.  So on Android a shared library gets
+# no vnum, i.e. no libfoo.so.4.1.0 and no soname libfoo.so.4.
+from waflib import TaskGen
+
+@TaskGen.feature('cshlib', 'cxxshlib')
+@TaskGen.before_method('apply_vnum')
+def android_unversioned_shlib(self):
+    if self.env['TARGET_OS'] == 'android':
+        self.vnum = ''
+
 def build(bld):
     if bld.is_install:
         set_version (True)
