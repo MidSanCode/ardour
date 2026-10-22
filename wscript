@@ -590,7 +590,7 @@ def ndk_toolchain (ndk, abi, api):
         """(cc, cxx) of the NDK's clang wrappers for one ABI and API level.
 
         NDK r19 and later ship per-API-level clang wrappers
-        (aarch64-linux-android26-clang) that know the sysroot and the target
+        (aarch64-linux-android28-clang) that know the sysroot and the target
         triple themselves, so no extra --target/--sysroot flags are needed.
         """
         triple = {
@@ -1085,8 +1085,8 @@ def options(opt):
                     help='Specify the target for cross-compiling [auto,none,x86,i386,i686,x86_64,tiger,leopard,mingw,msvc,wasm32,android,android-arm64-v8a]')
     opt.add_option('--with-ndk', type='string', action='store', default='', dest='with_ndk',
                     help='Path to the Android NDK (required for --dist-target=android; ANDROID_NDK_ROOT is used if unset)')
-    opt.add_option('--android-api', type='int', action='store', default=26, dest='android_api',
-                    help='Android API level to build against (default 26, the first release with AAudio)')
+    opt.add_option('--android-api', type='int', action='store', default=28, dest='android_api',
+                    help='Android API level to build against (default 28: AAudio needs 26, and iconv is in bionic from 28 on)')
     opt.add_option('--with-frontends', type='string', action='store', default='all', dest='with_frontends',
                     help='Which frontends to build: all (default), or a comma-separated list of gtk,headless,lua,utils, or none')
     opt.add_option('--no-tk-stack', action='store_true', default=False, dest='no_tk_stack',

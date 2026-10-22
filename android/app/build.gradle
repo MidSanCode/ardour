@@ -9,8 +9,9 @@ android {
 
     defaultConfig {
         applicationId "org.ardour.ardour"
-        // AAudio, and therefore the audio backend, needs API 26
-        minSdk 26
+        // the engine is built against API 28 (AAudio needs 26, iconv in
+        // bionic needs 28)
+        minSdk 28
         targetSdk 34
         versionCode 1
         versionName "1.0"
