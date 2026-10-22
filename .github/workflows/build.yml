@@ -125,7 +125,7 @@ on:
         type: boolean
         default: true
       android:
-        description: "Structural: Android target (NDK toolchain, AAudio, app shell)"
+        description: "Android (engine for arm64-v8a and x86_64, application)"
         type: boolean
         default: true
       debug_build:
@@ -1021,32 +1021,34 @@ jobs:
           fi
 
   # ---------------------------------------------------------------------------
-  # Structural: the Android target.  Three checks, in increasing order of what
-  # they prove:
-  #   1. the NDK toolchain is accepted by waf, and the target decisions are the
-  #      Android ones.  There is no cross-compiled dependency stack for Android
-  #      yet, so the configure is expected to stop at the first dependency; the
-  #      job asserts *where* it stopped, not that it finished.
-  #   2. the AAudio wrapper and the JNI bridge really compile against the NDK:
-  #      neither has an Ardour dependency, so this is a complete compile of
-  #      real code against the real NDK headers and libraries.
-  #   3. the application shell (WebView + JS bridge) assembles.
+  # Android: the engine, cross-compiled with the NDK for both ABIs the
+  # application ships (arm64-v8a for devices, x86_64 for the emulator).
+  #
+  #   1. the dependency stack (tools/android/build-deps.sh), cached on the
+  #      hash of tools/android and saved as soon as it is complete, so that a
+  #      failure further down does not throw an hour of building away;
+  #   2. ./waf configure + build + install of the engine libraries, the
+  #      backends and the JNI bridge against that stack;
+  #   3. the libraries, flattened into one directory the way an APK carries
+  #      them, uploaded as android-engine-<abi>.
   android:
-    name: Android target (structural)
+    name: Android engine (${{ matrix.abi }})
     if: inputs.android
     runs-on: ubuntu-22.04
-    timeout-minutes: 60
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        abi: [arm64-v8a, x86_64]
+    env:
+      ANDROID_API: 28
+      DEPS: ${{ github.workspace }}/android-deps/${{ matrix.abi }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
-
-      - name: Install the Android SDK and the NDK
+      - name: Install the Android SDK
         uses: android-actions/setup-android@v3
         with:
           # The default package list of the action contains "tools", which the
@@ -1054,12 +1056,42 @@ jobs:
           # before it installs anything.
           packages: 'platform-tools'
 
-      - name: Install the NDK and the platform
+      - name: Install the NDK
         run: |
           set -eux
           SDK="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
-          sdkmanager --install "ndk;26.1.10909125" "platforms;android-34" "build-tools;34.0.0"
+          sdkmanager --install "ndk;26.1.10909125"
           echo "ANDROID_NDK_ROOT=$SDK/ndk/26.1.10909125" >> "$GITHUB_ENV"
+
+      - name: Install the host tools
+        run: |
+          set -eux
+          sudo apt-get update -qq
+          # libboost-dev: boost is header-only, the headers are copied into the stack
+          sudo apt-get install -y --no-install-recommends pkg-config ninja-build libboost-dev gettext
+          pip3 install --user 'meson==1.5.2'
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Restore the dependency stack
+        id: deps-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.DEPS }}
+          key: android-deps-${{ matrix.abi }}-api28-ndk26.1-${{ hashFiles('tools/android/build-deps.sh', 'tools/android/cmake/**') }}
+
+      - name: Build the dependency stack
+        if: steps.deps-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euxo pipefail
+          meson --version; cmake --version | head -1
+          SRCDIR="$RUNNER_TEMP/src" tools/android/build-deps.sh "${{ matrix.abi }}" "$DEPS" 2>&1 | tee "$RUNNER_TEMP/deps.log"
+
+      - name: Save the dependency stack
+        if: steps.deps-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.DEPS }}
+          key: ${{ steps.deps-cache.outputs.cache-primary-key }}
 
       - name: Ensure a version is available to waf
         run: |
@@ -1071,102 +1103,46 @@ jobs:
           fi
           git describe HEAD
 
-      - name: Configure for android (target selection)
+      - name: Configure
         run: |
           set -euxo pipefail
-
-          set +e
+          export PKG_CONFIG_LIBDIR="$DEPS/lib/pkgconfig:$DEPS/share/pkgconfig"
           ./waf configure --out=build-android \
-            --dist-target=android --with-ndk="$ANDROID_NDK_ROOT" --android-api=26 \
-            --with-frontends=none --no-tk-stack --with-backends=aaudio \
-            --no-execstack --no-dr-mingw 2>&1 | tee android-configure.log
-          STATUS=${PIPESTATUS[0]}
-          set -e
+            --dist-target=android-${{ matrix.abi }} --with-ndk="$ANDROID_NDK_ROOT" --android-api=$ANDROID_API \
+            --with-frontends=none --no-tk-stack --no-surfaces --with-backends=aaudio,dummy \
+            --cxx17 --no-nls --no-lrdf --no-execstack --no-dr-mingw \
+            --prefix=/ardour 2>&1 | tee android-configure.log
+          grep -q "Android target: ABI .*, API level $ANDROID_API, backends: aaudio, dummy" android-configure.log
 
-          # The NDK's clang must be the compiler that was selected: waf has no
-          # android tool, so the clang tool is used with a CC override.
-          if ! grep -q 'aarch64-linux-android26-clang' android-configure.log; then
-            echo "::error::the NDK toolchain was not selected"
-            tail -40 android-configure.log
-            exit 1
-          fi
-
-          # ...and the target decisions must be the Android ones.
-          if ! grep -q 'Android target: ABI aarch64, NDK .*, API level 26, backends: aaudio, dummy' \
-               android-configure.log; then
-            echo "::error::the android target decisions were not made"
-            tail -40 android-configure.log
-            exit 1
-          fi
-
-          if [ "$STATUS" -ne 0 ]; then
-            # The cross-compiled dependency stack does not exist yet, so the
-            # configure is expected to stop at the first dependency.  Where it
-            # stopped is reported, but it is not a failure of this job: what
-            # this job pins are the target decisions above.
-            echo "the android configure stopped with status $STATUS; the last checks were:"
-            grep -i 'checking for' android-configure.log | tail -5
-          else
-            echo "the android configure completed: the dependency stack resolves now"
-          fi
-
-      - name: Show the AAudio API of the installed NDK
+      - name: Build
         run: |
-          set -eux
-          # The wrapper is written against this API, so the API is part of the
-          # evidence of the job: the result codes and the functions whose
-          # signature is not obvious are printed here.
-          SYSDIR="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include/aaudio"
-          grep -n 'AAUDIO_OK\|AAUDIO_ERROR' "$SYSDIR/AAudioTypes.h" | head -30
-          grep -n 'AAudio_convertResultToText\|AAudio_createStreamBuilder\|AAudioStreamBuilder_openStream' \
-            "$SYSDIR/AAudio.h"
+          set -euxo pipefail
+          ./waf build -j"$(nproc)" 2>&1 | tee android-build.log
 
-      - name: Compile and link the AAudio wrapper against the NDK
+      - name: Install into a staging root
         run: |
-          set -eux
-          # The AAudio wrapper has no Ardour dependency, so it can be built on
-          # its own: this is a complete compile of real code against the real
-          # NDK headers and libraries.
-          CLANG="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang"
-          test -x "$CLANG"
-          "$CLANG" -c -Wall -Wextra -O2 -fPIC \
-            -I libs/backends/aaudio \
-            -o /tmp/aaudio_device.o \
-            libs/backends/aaudio/aaudio_device.c
-          # The library is linked by its path, so that the job does not depend
-          # on the spelling of its name; the name is printed as well.
-          AAUDIO_LIB=$(find "$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android" \
-                          -iname 'libaaudio.so' | head -1)
-          test -n "$AAUDIO_LIB"
-          echo "the AAudio library of the NDK is $AAUDIO_LIB"
+          set -euxo pipefail
+          ./waf install --destdir="$PWD/stage-android"
 
-          # The backend asks for the library by name, so the name the job found
-          # and the name the backend uses have to be the same one.
-          grep -q "linkflags='-laaudio'" libs/backends/aaudio/wscript
-
-          "$CLANG" -shared -o /tmp/libaaudio_device.so /tmp/aaudio_device.o "$AAUDIO_LIB"
-          echo "the AAudio wrapper compiles and links against the NDK"
-
-      - name: Compile the JNI bridge against the NDK
+      - name: Collect the libraries the way an APK carries them
         run: |
-          set -eux
-          # The JNI bridge needs jni.h (from the NDK) and the AAudio wrapper.
-          CLANGXX="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang++"
-          test -x "$CLANGXX"
-          "$CLANGXX" -c -Wall -Wextra -O2 -fPIC -std=c++17 \
-            -I libs/android -I libs/backends/aaudio \
-            -o /tmp/ardour_android.o \
-            libs/android/ardour_android.cc
-          echo "the JNI bridge compiles against the NDK"
+          set -euxo pipefail
+          tools/android/collect-engine.sh "$PWD/stage-android/ardour" "$DEPS" "$PWD/engine-${{ matrix.abi }}"
+          ls -l "engine-${{ matrix.abi }}/jniLibs/${{ matrix.abi }}"
 
-      - name: Build the application shell
-        run: |
-          set -eux
-          # The gradle wrapper jar is a binary and is not committed, so a
-          # pinned distribution is used instead.
-          GRADLE_VERSION=8.7
-          curl -fsSL -o /tmp/gradle.zip "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip"
-          unzip -q /tmp/gradle.zip -d /opt
-          cd android
-          /opt/gradle-${GRADLE_VERSION}/bin/gradle --no-daemon assembleDebug
-          ls -l app/build/outputs/apk/debug/
+      - name: Upload the logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-logs-${{ matrix.abi }}
+          path: |
+            android-configure.log
+            android-build.log
+            build-android/config.log
+          if-no-files-found: ignore
+
+      - name: Upload the engine
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-engine-${{ matrix.abi }}
+          path: engine-${{ matrix.abi }}
