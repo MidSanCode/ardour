@@ -289,7 +289,9 @@ pthread_cancel_all ()
 			continue;
 		}
 		DEBUG_TRACE (PBD::DEBUG::Threads, string_compose ("Cancel: '%1'\n", t.second));
+#ifndef __ANDROID__
 		pthread_cancel (t.first);
+#endif
 	}
 	all_threads.clear ();
 	pthread_mutex_unlock (&thread_map_lock);
@@ -306,7 +308,12 @@ pthread_cancel_one (pthread_t thread)
 		}
 	}
 
+#ifndef __ANDROID__
 	pthread_cancel (thread);
+#else
+	/* bionic has no pthread_cancel: the thread is forgotten, and has to
+	 * finish on its own */
+#endif
 	pthread_mutex_unlock (&thread_map_lock);
 }
 
