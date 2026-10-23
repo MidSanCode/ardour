@@ -787,11 +787,19 @@ m_mixer_strips ()
 	return j;
 }
 
+/* Mute, solo and record-arm are applied by the process thread through the
+ * session's realtime event queue; wait (briefly) for the change to land so
+ * the reply describes the new state.
+ */
 static void
 set_control (std::shared_ptr<AutomationControl> c, double v)
 {
-	if (c) {
-		c->set_value (v, PBD::Controllable::NoGroup);
+	if (!c) {
+		return;
+	}
+	c->set_value (v, PBD::Controllable::NoGroup);
+	for (int i = 0; i < 100 && fabs (c->get_value () - v) > 1e-4 * std::max (1.0, fabs (v)); ++i) {
+		g_usleep (2000);
 	}
 }
 
