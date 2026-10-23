@@ -412,6 +412,18 @@ AAudioBackend::samples_since_cycle_start ()
 	return 0;
 }
 
+/* a worker of the engine's process graph: runs the function it was given
+ * (the main process thread is aaudio_process_thread) */
+void*
+AAudioBackend::aaudio_worker_thread (void* arg)
+{
+	ThreadData* td = reinterpret_cast<ThreadData*> (arg);
+	std::function<void ()> f = td->f;
+	delete td;
+	f ();
+	return 0;
+}
+
 int
 AAudioBackend::create_process_thread (std::function<void()> func)
 {
@@ -419,9 +431,9 @@ AAudioBackend::create_process_thread (std::function<void()> func)
 	ThreadData* td = new ThreadData (this, func, PBD_RT_STACKSIZE_PROC);
 
 	bool ok = _realtime && 0 == pbd_realtime_pthread_create ("AAudio Proc", PBD_SCHED_FIFO, PBD_RT_PRI_PROC,
-			PBD_RT_STACKSIZE_PROC, &thread_id, aaudio_process_thread, td);
+			PBD_RT_STACKSIZE_PROC, &thread_id, aaudio_worker_thread, td);
 
-	if (!ok && pbd_pthread_create (PBD_RT_STACKSIZE_PROC, &thread_id, aaudio_process_thread, td)) {
+	if (!ok && pbd_pthread_create (PBD_RT_STACKSIZE_PROC, &thread_id, aaudio_worker_thread, td)) {
 		PBD::error << _("AAudioBackend: cannot create process thread.") << endmsg;
 		delete td;
 		return -1;
@@ -445,7 +457,15 @@ AAudioBackend::join_process_threads ()
 bool
 AAudioBackend::in_process_thread ()
 {
-	return pthread_equal (_main_thread, pthread_self ());
+	if (pthread_equal (_main_thread, pthread_self ()) != 0) {
+		return true;
+	}
+	for (auto const& t : _threads) {
+		if (pthread_equal (t, pthread_self ()) != 0) {
+			return true;
+		}
+	}
+	return false;
 }
 
 uint32_t

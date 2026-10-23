@@ -268,6 +268,7 @@ class AAudioBackend : public AudioBackend, public PortEngineSharedImpl
 
 		/* process threads */
 		static void* aaudio_process_thread (void *);
+		static void* aaudio_worker_thread (void *);
 		std::vector<pthread_t> _threads;
 
 		struct ThreadData {
