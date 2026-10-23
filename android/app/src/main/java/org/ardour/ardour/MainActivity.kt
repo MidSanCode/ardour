@@ -7,15 +7,9 @@ import android.webkit.WebViewClient
 import androidx.appcompat.app.AppCompatActivity
 
 /**
- * The Ardour Android UI.
- *
- * The UI is the shared JavaScript frontend: the same code that runs in a
- * browser against the wasm engine runs here against the native engine, over
- * the JavascriptInterface bridge in EngineBridge.
- *
- * The page is loaded from the assets, so the application works without any
- * network access; the websocket control surface (if it is enabled) is
- * reachable on the loopback interface.
+ * The Ardour Android UI: the shared JavaScript frontend (frontend/ at the top
+ * of the repository, packaged as the "web" assets) in a WebView, talking to
+ * the native engine through EngineBridge.
  */
 class MainActivity : AppCompatActivity() {
 
@@ -23,6 +17,13 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        val host = (application as ArdourApplication).engine
+        host.start()
+
+        if (intent?.getBooleanExtra("smoketest", false) == true) {
+            SmokeTest.run(host)
+        }
 
         val view = WebView(this)
         view.layoutParams = ViewGroup.LayoutParams(
@@ -33,20 +34,11 @@ class MainActivity : AppCompatActivity() {
         view.settings.domStorageEnabled = true
         view.settings.allowFileAccess = true
         view.webViewClient = WebViewClient()
-        view.addJavascriptInterface(EngineBridge(this), "ArdourNative")
-        view.loadUrl("file:///android_asset/index.html")
+        view.addJavascriptInterface(EngineBridge(host), "ArdourNative")
+        view.loadUrl("file:///android_asset/web/index.html")
 
         webView = view
         setContentView(view)
-    }
-
-    override fun onBackPressed() {
-        val view = webView
-        if (view != null && view.canGoBack()) {
-            view.goBack()
-        } else {
-            super.onBackPressed()
-        }
     }
 
     override fun onDestroy() {

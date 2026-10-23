@@ -17,8 +17,8 @@ android {
         versionName "1.0"
 
         ndk {
-            // the same ABI the engine is cross-compiled for
-            abiFilters 'arm64-v8a'
+            // the ABIs the engine is cross-compiled for (x86_64: the emulator)
+            abiFilters 'arm64-v8a', 'x86_64'
         }
     }
 
@@ -38,16 +38,32 @@ android {
         jvmTarget = '17'
     }
 
-    // The engine is a prebuilt shared library: it is produced by
-    // "waf configure --dist-target=android" and copied into jniLibs by
-    // tools/copy-android-engine.sh.  When it is missing the application still
-    // builds and starts, and reports that the engine is not available.
+    // The engine is prebuilt: tools/android/collect-engine.sh puts the native
+    // libraries of each ABI into src/main/jniLibs/<abi> and the engine's data
+    // files into src/main/engine-assets/ardour.  The UI is the shared frontend
+    // at the top of the repository, packaged as assets/web.
     sourceSets {
         main {
             jniLibs.srcDirs = ['src/main/jniLibs']
+            assets.srcDirs = ['src/main/assets', 'src/main/engine-assets', "$buildDir/generated/web-assets"]
+        }
+    }
+
+    packagingOptions {
+        jniLibs {
+            // the engine finds its backends and panners by listing
+            // nativeLibraryDir, so the libraries have to be extracted
+            useLegacyPackaging true
         }
     }
 }
+
+// assets/web is a copy of frontend/, so that the frontend has one home
+tasks.register('copyFrontend', Copy) {
+    from "${rootDir}/../frontend"
+    into "$buildDir/generated/web-assets/web"
+}
+preBuild.dependsOn copyFrontend
 
 dependencies {
     implementation 'androidx.appcompat:appcompat:1.6.1'
