@@ -31,6 +31,10 @@
 
 using namespace ARDOUR;
 
+ProtoPort::~ProtoPort ()
+{
+}
+
 BackendPort::BackendPort (PortEngineSharedImpl &b, const std::string& name, PortFlags flags)
 	: _backend (b)
 	, _name  (name)

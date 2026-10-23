@@ -77,7 +77,13 @@ class PortManager;
 class LIBARDOUR_API ProtoPort {
   public:
 	ProtoPort() {}
-	virtual ~ProtoPort () {}
+	/* out of line: the destructor is the key function, so that the type
+	 * information of ProtoPort exists once, in libardour.  Backends are
+	 * modules that cast port handles; with a copy of their own (Android
+	 * loads them without a global symbol scope, and libc++ compares type
+	 * information by address) dynamic_cast fails across the boundary.
+	 */
+	virtual ~ProtoPort ();
 };
 
 class LIBARDOUR_API PortEngine
