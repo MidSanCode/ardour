@@ -1114,7 +1114,8 @@ jobs:
       - name: Build
         run: |
           set -euxo pipefail
-          ./waf build -j"$(nproc)" 2>&1 | tee android-build.log
+          # -k: report every failing file of a run, not only the first
+          ./waf build -k -j"$(nproc)" 2>&1 | tee android-build.log
 
       - name: Install into a staging root
         run: |
@@ -1132,6 +1133,10 @@ jobs:
         run: |
           # the tail of whichever log was being written, as an annotation, so
           # that the failure can be read without downloading the logs
+          if [ -s android-build.log ]; then
+            # every distinct compiler error, with the file it is in
+            echo "::error title=compile errors::$(grep -E 'error:|undefined (reference|symbol)' android-build.log | sort -u | head -n 120 | sed 's/%/%25/g' | sed ':a;N;$!ba;s/\n/%0A/g')"
+          fi
           for f in android-build.log android-configure.log "$RUNNER_TEMP/deps.log"; do
             if [ -s "$f" ]; then
               echo "::error title=$(basename "$f")::$(tail -n 60 "$f" | sed 's/%/%25/g' | sed ':a;N;$!ba;s/\n/%0A/g')"
