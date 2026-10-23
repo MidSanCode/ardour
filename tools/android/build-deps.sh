@@ -107,7 +107,8 @@ fetch () {
 		curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 -o "$file.part" "$url"
 		mv "$file.part" "$file"
 	fi
-	dir=$(tar tf "$file" | head -1 | cut -d/ -f1)
+	# (tar is cut short by head: its SIGPIPE is not a failure)
+	dir=$( (tar tf "$file" || true) | head -1 | cut -d/ -f1)
 	[ -d "$SRCDIR/$dir" ] || tar xf "$file" -C "$SRCDIR"
 	echo "$SRCDIR/$dir"
 }
