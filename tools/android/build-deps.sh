@@ -161,6 +161,19 @@ cmake_own_pkg () {
 	stamp "$name"
 }
 
+# --- zlib ---------------------------------------------------------------------
+
+# zlib is part of the NDK, but it has no .pc file there, and packages that
+# found it through CMake (curl, libxml2) name it in their own .pc files.
+mkdir -p "$PREFIX/lib/pkgconfig"
+cat > "$PREFIX/lib/pkgconfig/zlib.pc" <<'PC'
+Name: zlib
+Description: zlib from the Android NDK
+Version: 1.2.13
+Libs: -lz
+Cflags:
+PC
+
 # --- GLib family --------------------------------------------------------------
 
 # libffi, pcre2 and proxy-libintl come from glib's own meson subprojects;
