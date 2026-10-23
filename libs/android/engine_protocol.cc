@@ -1200,12 +1200,24 @@ m_region_peaks (Params& p)
 	}
 	int count = p["count"].empty () ? 200 : atoi (p["count"].c_str ());
 	count     = std::max (1, std::min (count, 4000));
-	samplecnt_t len = r->length ().samples ();
-	std::vector<PeakData> peaks (count);
-	samplecnt_t got = r->read_peaks (&peaks[0], count, 0, len, 0, (double) len / count);
+	/* read the audio itself rather than the peak files, which are built in
+	 * the background and may not exist yet; a long region is sampled, at most
+	 * 4096 samples per bucket
+	 */
+	samplecnt_t const len    = r->length ().samples ();
+	samplecnt_t const bucket = std::max<samplecnt_t> (1, len / count);
+	samplecnt_t const span   = std::min<samplecnt_t> (bucket, 4096);
+	std::vector<Sample> buf (span);
 	std::string j = "{\"ok\":true,\"peaks\":[";
-	for (samplecnt_t i = 0; i < got; ++i) {
-		j += (i ? "," : "") + num (peaks[i].min) + "," + num (peaks[i].max);
+	for (int i = 0; i < count && i * bucket < len; ++i) {
+		samplecnt_t n   = std::min (span, len - i * bucket);
+		samplecnt_t got = r->read (&buf[0], i * bucket, n, 0);
+		float lo = 0, hi = 0;
+		for (samplecnt_t k = 0; k < got; ++k) {
+			lo = std::min (lo, buf[k]);
+			hi = std::max (hi, buf[k]);
+		}
+		j += (i ? "," : "") + num (lo) + "," + num (hi);
 	}
 	j += "]}";
 	return j;
