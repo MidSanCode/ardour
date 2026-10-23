@@ -44,6 +44,8 @@ fi
 SYSTEM="libc.so libm.so libdl.so liblog.so libz.so libandroid.so libaaudio.so
 libOpenSLES.so libEGL.so libGLESv2.so libjnigraphics.so libmediandk.so
 libamidi.so libnativewindow.so libvulkan.so libsync.so libbinder_ndk.so"
+# one line, so that every name is matched between blanks
+SYSTEM=$(echo $SYSTEM)
 
 missing=0
 for so in "$LIBS"/*.so; do
