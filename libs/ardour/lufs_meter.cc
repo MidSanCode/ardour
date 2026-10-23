@@ -398,7 +398,7 @@ void
 LUFSMeter::calc_true_peak (float const** data, const uint32_t n_samples)
 {
 	float const cfg_db_s = Config->get_meter_falloff ();
-#ifdef _GNU_SOURCE
+#if defined _GNU_SOURCE && !defined __ANDROID__ /* bionic has no exp10f */
 	float const falloff = exp10f (-0.05f * cfg_db_s * n_samples / _samplerate);
 #else
 	float const falloff = powf (10.f, -0.05f * cfg_db_s * n_samples / _samplerate);
