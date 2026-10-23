@@ -85,6 +85,12 @@ static bool panner_filter (const string& str, void */*arg*/)
 	#endif
 #elif defined (__APPLE__)
 	return str[0] != '.' && (str.length() > 6 && str.find (".dylib") == (str.length() - 6));
+#elif defined (PLATFORM_ANDROID)
+	/* every native library of an application lives in one directory, so
+	 * only the panners themselves (libpan1in2out.so, libpanvbap.so, ...)
+	 * are candidates
+	 */
+	return str.find ("libpan") == 0 && str.length() > 9 && str.find (".so") == (str.length() - 3);
 #else
 	return str[0] != '.' && (str.length() > 3 && (str.find (".so") == (str.length() - 3) || str.find (".dll") == (str.length() - 4)));
 #endif
