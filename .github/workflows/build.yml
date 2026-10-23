@@ -1224,7 +1224,9 @@ jobs:
   # ---------------------------------------------------------------------------
   # Android: install the APK on an x86_64 emulator and run the smoke test,
   # which initialises the engine, creates a session, adds a track and rolls
-  # the transport through the frontend protocol (SmokeTest.kt).
+  # the transport through the frontend protocol, then exercises the mixer and
+  # the editor's regions (SmokeTest.kt); the frontend's editor and mixer views
+  # are then checked and photographed.
   android-emulator:
     name: Android emulator smoke test
     if: inputs.android
@@ -1256,14 +1258,22 @@ jobs:
             adb logcat -c
             adb shell am start -n org.ardour.ardour/.MainActivity --ez smoketest true
             for i in $(seq 1 90); do sleep 2; if adb logcat -d -s ArdourSmoke:I | grep -q 'ARDOUR_SMOKE'; then break; fi; done
+            for i in $(seq 1 30); do sleep 1; if adb logcat -d -s ArdourUI:I | grep -q 'ARDOUR_UI editor'; then break; fi; done
+            adb exec-out screencap -p > ui-editor.png
+            for i in $(seq 1 30); do sleep 1; if adb logcat -d -s ArdourUI:I | grep -q 'ARDOUR_UI mixer'; then break; fi; done
+            adb exec-out screencap -p > ui-mixer.png
             adb logcat -d > logcat.txt
-            grep -E 'ArdourSmoke|ArdourEngine|ardour' logcat.txt | tail -80
+            grep -E 'ArdourSmoke|ArdourUI|ArdourEngine|ardour' logcat.txt | tail -120
             grep -q 'ARDOUR_SMOKE PASS' logcat.txt
+            grep -E 'ARDOUR_UI editor .*lanes=2 regions=[1-9]' logcat.txt
+            grep -E 'ARDOUR_UI mixer .*strips=4' logcat.txt
 
       - name: Upload the log
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: android-emulator-logcat
-          path: logcat.txt
+          path: |
+            logcat.txt
+            ui-*.png
           if-no-files-found: ignore
