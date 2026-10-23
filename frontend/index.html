@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>Ardour</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>Ardour</h1>
+  <span id="engine" class="badge">engine: starting&hellip;</span>
+</header>
+
+<section id="sessions">
+  <h2>Session</h2>
+  <p id="current">no session loaded</p>
+  <form id="create">
+    <input id="new-name" placeholder="new session name" autocomplete="off" required>
+    <button type="submit">Create</button>
+  </form>
+  <ul id="session-list"></ul>
+  <div class="row">
+    <button id="save" disabled>Save</button>
+    <button id="close" disabled>Close</button>
+  </div>
+</section>
+
+<section id="transport">
+  <h2>Transport</h2>
+  <div class="row">
+    <button id="play" disabled>&#9654; Play</button>
+    <button id="stop" disabled>&#9632; Stop</button>
+    <span id="clock">00:00:00.000</span>
+  </div>
+</section>
+
+<section id="tracks">
+  <h2>Tracks</h2>
+  <form id="add-track">
+    <input id="track-name" placeholder="track name" value="Audio" autocomplete="off">
+    <select id="track-channels">
+      <option value="1">mono</option>
+      <option value="2">stereo</option>
+    </select>
+    <button type="submit" disabled>Add audio track</button>
+  </form>
+  <ul id="track-list"></ul>
+</section>
+
+<p id="message" role="status"></p>
+
+<script src="bridge.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
