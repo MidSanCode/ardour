@@ -19,7 +19,7 @@ def build(bld):
             'engine_protocol.cc',
             'ardour_android.cc',
             ]
-    obj.includes = ['.']
+    obj.includes = ['.', '../backends/aaudio']
     obj.name     = 'ardour_android'
     obj.target   = 'ardour_android'
     obj.use      = ['libardour', 'libpbd', 'libtemporal', 'libevoral', 'aaudio_device']

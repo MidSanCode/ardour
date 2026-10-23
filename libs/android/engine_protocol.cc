@@ -229,23 +229,23 @@ log (int level, std::string const& msg)
 	}
 }
 
-class LogReceiver : public PBD::Receiver
+class LogReceiver : public Receiver
 {
 protected:
-	void receive (PBD::Transmitter::Channel chn, const char* str)
+	void receive (Transmitter::Channel chn, const char* str)
 	{
 		switch (chn) {
-			case PBD::Transmitter::Debug:
+			case Transmitter::Debug:
 				return;
-			case PBD::Transmitter::Info:
+			case Transmitter::Info:
 				log (LogInfo, str);
 				break;
-			case PBD::Transmitter::Warning:
+			case Transmitter::Warning:
 				log (LogWarning, str);
 				break;
-			case PBD::Transmitter::Error:
-			case PBD::Transmitter::Fatal:
-			case PBD::Transmitter::Throw:
+			case Transmitter::Error:
+			case Transmitter::Fatal:
+			case Transmitter::Throw:
 				log (LogError, str);
 				break;
 		}
@@ -312,7 +312,7 @@ engine_thread_main (void*)
 		std::string reply;
 		try {
 			reply = r->job ();
-		} catch (PBD::failed_constructor const&) {
+		} catch (failed_constructor const&) {
 			reply = error_reply ("the engine could not construct the object");
 		} catch (AudioEngine::PortRegistrationFailure const& e) {
 			reply = error_reply (std::string ("port registration failed: ") + e.what ());
