@@ -44,11 +44,17 @@ class AAudioAudioPort : public BackendPort
 
 		DataType type () const { return DataType::AUDIO; }
 
+		/* an input port mixes the ports connected to it into its buffer */
 		void* get_buffer (pframes_t nframes);
 
+		Sample*       buffer ()             { return _buffer; }
+		const Sample* const_buffer () const { return _buffer; }
+
+		static const pframes_t max_buffer_size = 8192;
+
 	private:
-		Sample*   _buffer;
-		pframes_t _allocated;
+		/* fixed: get_buffer() is called from the process thread */
+		Sample _buffer[max_buffer_size];
 }; // class AAudioAudioPort
 
 class AAudioBackend : public AudioBackend, public PortEngineSharedImpl

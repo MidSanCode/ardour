@@ -51,26 +51,39 @@ _x_get_monotonic_usec ()
 
 AAudioAudioPort::AAudioAudioPort (AAudioBackend& b, const std::string& name, PortFlags flags)
 	: BackendPort (b, name, flags)
-	, _buffer (0)
-	, _allocated (0)
 {
+	memset (_buffer, 0, sizeof (_buffer));
 }
 
 AAudioAudioPort::~AAudioAudioPort ()
 {
-	delete [] _buffer;
 }
 
 void*
 AAudioAudioPort::get_buffer (pframes_t nframes)
 {
-	if (_buffer == 0) {
-		_buffer = new Sample [nframes];
-		_allocated = nframes;
-	} else if (_allocated < nframes) {
-		delete [] _buffer;
-		_buffer = new Sample [nframes];
-		_allocated = nframes;
+	if (nframes > max_buffer_size) {
+		nframes = max_buffer_size;
+	}
+
+	if (is_input ()) {
+		const std::set<BackendPortPtr>& connections = get_connections ();
+		std::set<BackendPortPtr>::const_iterator it = connections.begin ();
+		if (it == connections.end ()) {
+			memset (_buffer, 0, nframes * sizeof (Sample));
+		} else {
+			std::shared_ptr<const AAudioAudioPort> source = std::dynamic_pointer_cast<const AAudioAudioPort> (*it);
+			assert (source && source->is_output ());
+			memcpy (_buffer, source->const_buffer (), nframes * sizeof (Sample));
+			while (++it != connections.end ()) {
+				source = std::dynamic_pointer_cast<const AAudioAudioPort> (*it);
+				assert (source && source->is_output ());
+				const Sample* src = source->const_buffer ();
+				for (pframes_t s = 0; s < nframes; ++s) {
+					_buffer[s] += src[s];
+				}
+			}
+		}
 	}
 	return _buffer;
 }
@@ -688,10 +701,12 @@ AAudioBackend::capture_input (pframes_t nframes)
 
 	/* the device data is interleaved, the port buffers are not */
 	for (uint32_t c = 0; c < channels && c < _system_inputs.size (); ++c) {
-		Sample* buf = (Sample*) get_buffer (_system_inputs[c], nframes);
-		if (!buf) {
+		/* a capture port is an output of the device side: write into it */
+		std::shared_ptr<AAudioAudioPort> port = std::dynamic_pointer_cast<AAudioAudioPort> (_system_inputs[c]);
+		if (!port) {
 			continue;
 		}
+		Sample* buf = port->buffer ();
 		for (pframes_t f = 0; f < nframes; ++f) {
 			buf[f] = _input_buffer[f * channels + c];
 		}
@@ -710,7 +725,8 @@ AAudioBackend::render_output (pframes_t nframes)
 	memset (_output_buffer.data (), 0, sizeof (float) * nframes * channels);
 
 	for (uint32_t c = 0; c < channels && c < _system_outputs.size (); ++c) {
-		Sample* buf = (Sample*) get_buffer (_system_outputs[c], nframes);
+		/* a playback port is an input: its buffer is the mix of its connections */
+		Sample* buf = (Sample*) _system_outputs[c]->get_buffer (nframes);
 		if (!buf) {
 			continue;
 		}
