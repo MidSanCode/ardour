@@ -29,6 +29,7 @@
 # copied from the host (see the end of this file).
 
 set -euo pipefail
+shopt -s inherit_errexit
 
 ABI=${1:?usage: build-deps.sh <abi> <prefix>}
 PREFIX=$(mkdir -p "${2:?usage: build-deps.sh <abi> <prefix>}" && cd "$2" && pwd)
@@ -101,7 +102,11 @@ CMAKE_ARGS=(
 fetch () {
 	local url=$1 file dir
 	file=$SRCDIR/$(basename "$url")
-	[ -f "$file" ] || curl -fsSL --retry 3 -o "$file" "$url"
+	if [ ! -f "$file" ]; then
+		# the mirrors drop connections now and then: retry on any error
+		curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 -o "$file.part" "$url"
+		mv "$file.part" "$file"
+	fi
 	dir=$(tar tf "$file" | head -1 | cut -d/ -f1)
 	[ -d "$SRCDIR/$dir" ] || tar xf "$file" -C "$SRCDIR"
 	echo "$SRCDIR/$dir"
