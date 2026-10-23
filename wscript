@@ -620,7 +620,7 @@ def select_children (env, what = 'build'):
                         continue
                 if i == 'libs/surfaces' and not with_surfaces:
                         continue
-                if i == 'libs/android' and env.get('TARGET_OS', '') != 'android':
+                if i == 'libs/android' and env['TARGET_OS'] != 'android':
                         continue
                 if i in FRONTEND_CHILDREN:
                         if want != 'all' and not FRONTEND_CHILDREN[i] in want:

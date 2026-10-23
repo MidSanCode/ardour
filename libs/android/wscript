@@ -27,8 +27,8 @@ def build(bld):
     obj.linkflags = ['-llog']
     obj.install_path  = os.path.join(bld.env['LIBDIR'])
     obj.defines = [
-            'ARDOUR_ANDROID_VERSION="' + bld.env.get('VERSION', 'unknown') + '"',
-            'ARDOUR_TARGET_OS="' + bld.env.get('TARGET_OS', 'unknown') + '"',
-            'ARDOUR_TARGET_ABI="' + bld.env.get('TARGET_ABI', 'unknown') + '"',
-            'ARDOUR_ANDROID_API=' + str (bld.env.get('ANDROID_API', 0)),
+            'ARDOUR_ANDROID_VERSION="' + str (bld.env['VERSION'] or 'unknown') + '"',
+            'ARDOUR_TARGET_OS="' + str (bld.env['TARGET_OS'] or 'unknown') + '"',
+            'ARDOUR_TARGET_ABI="' + str (bld.env['TARGET_ABI'] or 'unknown') + '"',
+            'ARDOUR_ANDROID_API=' + str (bld.env['ANDROID_API'] or 0),
             ]
