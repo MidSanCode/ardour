@@ -9,7 +9,8 @@ def options(opt):
 def configure(conf):
     autowaf.check_pkg(conf, 'lv2', atleast_version='1.0.0',
                       uselib_store='LV2_1_0_0')
-    autowaf.check_pkg(conf, 'cairo', uselib_store='CAIRO', atleast_version='1.12.0')
+    # cairo only draws the inline display, which builds without it (Android)
+    autowaf.check_pkg(conf, 'cairo', uselib_store='CAIRO', atleast_version='1.12.0', mandatory=False)
 
 def build(bld):
     bundle = 'a-delay.lv2'
@@ -37,6 +38,9 @@ def build(bld):
               use          = 'LV2_1_0_0'
               )
     obj.env.cshlib_PATTERN = module_pat
+    if not bld.is_defined('HAVE_CAIRO'):
+        # the inline display (LV2_EXTENDED) is drawn with cairo
+        obj.env.DEFINES = [d for d in obj.env.DEFINES if not d.startswith('LV2_EXTENDED')]
     obj.env.cxxshlib_PATTERN = module_pat
 
 # vi:set ts=4 sw=4 et:
