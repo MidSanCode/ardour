@@ -30,7 +30,23 @@
  *   transport.state                       rolling, position (samples, seconds)
  *   tracks.list                           every track: id, name, channels
  *   tracks.add       {name, channels}     adds an audio track (1 or 2 channels)
- *   meters                                peak level in dBFS per track and channel
+ *   tracks.remove    {id}                 removes a track or bus
+ *   meters                                peak level in dBFS per strip and channel
+ *
+ *   mixer.strips                          tracks, busses and the master bus: gain_db,
+ *                                         pan (-1 .. 1 or null), mute, solo, rec
+ *   strip.set        {id, gain_db?, pan?, mute?, solo?, rec?, name?}
+ *   buses.add        {name}               adds a stereo audio bus
+ *
+ *   timeline                              every track with its regions (samples)
+ *   regions.tone     {track, position?, seconds?, frequency?}
+ *                                         records a sine tone into a new region
+ *   region.move      {id, position?, track?}
+ *   region.split     {id, position}
+ *   region.mute      {id, muted}
+ *   region.remove    {id}
+ *   region.peaks     {id, count}          min/max pairs of the first channel
+ *   transport.locate {position}
  *
  * All engine work happens on one thread owned by this module, which carries
  * the event loop and the session event pool libardour expects of a "GUI"

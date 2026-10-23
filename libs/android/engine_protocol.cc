@@ -21,6 +21,7 @@
 #include <deque>
 #include <exception>
 #include <functional>
+#include <algorithm>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -41,13 +42,21 @@
 #include "ardour/ardour.h"
 #include "ardour/audio_track.h"
 #include "ardour/audioengine.h"
+#include "ardour/audiofilesource.h"
+#include "ardour/audioregion.h"
+#include "ardour/dB.h"
+#include "ardour/file_source.h"
 #include "ardour/filename_extensions.h"
 #include "ardour/meter.h"
+#include "ardour/playlist.h"
 #include "ardour/presentation_info.h"
+#include "ardour/region_factory.h"
 #include "ardour/route.h"
 #include "ardour/session.h"
 #include "ardour/session_event.h"
+#include "ardour/track.h"
 #include "ardour/types.h"
+#include "ardour/utils.h"
 
 #include "engine_protocol.h"
 
@@ -659,6 +668,212 @@ m_tracks_add (Params& p)
 	return "{\"ok\":true,\"id\":" + q (added.front ()->id ().to_s ()) + ",\"name\":" + q (added.front ()->name ()) + "}";
 }
 
+/* ---------------------------------------------------------------------------
+ * mixer
+ */
+
+static bool
+truthy (std::string const& v)
+{
+	return v == "true" || v == "1";
+}
+
+static bool
+by_order (std::shared_ptr<Route> const& a, std::shared_ptr<Route> const& b)
+{
+	return a->presentation_info ().order () < b->presentation_info ().order ();
+}
+
+/* the routes a mixer shows: tracks and busses in presentation order, then
+ * the master bus
+ */
+static std::vector<std::shared_ptr<Route> >
+mixer_routes ()
+{
+	std::vector<std::shared_ptr<Route> > out;
+	std::shared_ptr<Route>               master;
+	std::shared_ptr<RouteList const>     routes = session->get_routes ();
+	for (auto const& r : *routes) {
+		if (r->is_master ()) {
+			master = r;
+		} else if (!r->is_monitor () && !r->is_auditioner () && !r->is_surround_master ()) {
+			out.push_back (r);
+		}
+	}
+	std::sort (out.begin (), out.end (), by_order);
+	if (master) {
+		out.push_back (master);
+	}
+	return out;
+}
+
+static std::vector<std::shared_ptr<Track> >
+tracks_in_order ()
+{
+	std::vector<std::shared_ptr<Track> > out;
+	for (auto const& r : mixer_routes ()) {
+		std::shared_ptr<Track> t = std::dynamic_pointer_cast<Track> (r);
+		if (t) {
+			out.push_back (t);
+		}
+	}
+	return out;
+}
+
+static std::shared_ptr<Route>
+find_route (std::string const& id)
+{
+	if (id.empty ()) {
+		return std::shared_ptr<Route> ();
+	}
+	return session->route_by_id (PBD::ID (id));
+}
+
+static std::string
+strip_kind (std::shared_ptr<Route> const& r)
+{
+	if (r->is_master ()) {
+		return "master";
+	}
+	if (std::dynamic_pointer_cast<AudioTrack> (r)) {
+		return "audio";
+	}
+	if (std::dynamic_pointer_cast<Track> (r)) {
+		return "midi";
+	}
+	return "bus";
+}
+
+static std::string
+strip_json (std::shared_ptr<Route> const& r)
+{
+	std::string j = "{\"id\":" + q (r->id ().to_s ());
+	j += ",\"name\":" + q (r->name ());
+	j += ",\"kind\":" + q (strip_kind (r));
+	j += ",\"channels\":" + std::to_string (std::max<uint32_t> (1, r->n_outputs ().n_audio ()));
+
+	std::shared_ptr<AutomationControl> gain = r->gain_control ();
+	j += ",\"gain_db\":" + num (gain ? accurate_coefficient_to_dB (gain->get_value ()) : 0);
+
+	std::shared_ptr<AutomationControl> pan = r->pan_azimuth_control ();
+	/* azimuth 0 is hard left and 1 hard right; the protocol uses -1 .. 1 */
+	j += ",\"pan\":" + (pan ? num (pan->get_value () * 2.0 - 1.0) : std::string ("null"));
+
+	std::shared_ptr<AutomationControl> mute = r->mute_control ();
+	j += std::string (",\"mute\":") + (mute && mute->get_value () > 0.5 ? "true" : "false");
+	std::shared_ptr<AutomationControl> solo = r->solo_control ();
+	j += std::string (",\"solo\":") + (solo && solo->get_value () > 0.5 ? "true" : "false");
+
+	std::shared_ptr<AutomationControl> rec = r->rec_enable_control ();
+	j += ",\"rec\":" + (rec ? std::string (rec->get_value () > 0.5 ? "true" : "false") : std::string ("null"));
+	j += "}";
+	return j;
+}
+
+static std::string
+m_mixer_strips ()
+{
+	std::string e = require_session ();
+	if (!e.empty ()) {
+		return e;
+	}
+	std::string j = "{\"ok\":true,\"strips\":[";
+	bool first = true;
+	for (auto const& r : mixer_routes ()) {
+		j += (first ? "" : ",") + strip_json (r);
+		first = false;
+	}
+	j += "]}";
+	return j;
+}
+
+static void
+set_control (std::shared_ptr<AutomationControl> c, double v)
+{
+	if (c) {
+		c->set_value (v, PBD::Controllable::NoGroup);
+	}
+}
+
+static std::string
+m_strip_set (Params& p)
+{
+	std::string e = require_session ();
+	if (!e.empty ()) {
+		return e;
+	}
+	std::shared_ptr<Route> r = find_route (p["id"]);
+	if (!r) {
+		return error_reply ("no such strip");
+	}
+	if (p.count ("gain_db")) {
+		double db = atof (p["gain_db"].c_str ());
+		/* the fader's range: silence below -60 dB, at most +6 dB */
+		double coeff = db <= -60 ? 0 : dB_to_coefficient (std::min (db, 6.0));
+		set_control (r->gain_control (), coeff);
+	}
+	if (p.count ("pan")) {
+		if (!r->pan_azimuth_control ()) {
+			return error_reply ("this strip has no panner");
+		}
+		double pan = std::max (-1.0, std::min (1.0, atof (p["pan"].c_str ())));
+		set_control (r->pan_azimuth_control (), (pan + 1.0) / 2.0);
+	}
+	if (p.count ("mute")) {
+		set_control (r->mute_control (), truthy (p["mute"]) ? 1 : 0);
+	}
+	if (p.count ("solo")) {
+		if (r->is_master ()) {
+			return error_reply ("the master bus cannot be soloed");
+		}
+		set_control (r->solo_control (), truthy (p["solo"]) ? 1 : 0);
+	}
+	if (p.count ("rec")) {
+		if (!r->rec_enable_control ()) {
+			return error_reply ("only tracks can be armed");
+		}
+		set_control (r->rec_enable_control (), truthy (p["rec"]) ? 1 : 0);
+	}
+	if (p.count ("name") && !p["name"].empty () && !r->is_master ()) {
+		r->set_name (p["name"]);
+	}
+	return "{\"ok\":true,\"strip\":" + strip_json (r) + "}";
+}
+
+static std::string
+m_buses_add (Params& p)
+{
+	std::string e = require_session ();
+	if (!e.empty ()) {
+		return e;
+	}
+	std::string name = p["name"].empty () ? std::string ("Bus") : p["name"];
+	RouteList added = session->new_audio_route (2, 2, std::shared_ptr<RouteGroup> (), 1, name,
+	                                            PresentationInfo::AudioBus, PresentationInfo::max_order);
+	if (added.empty ()) {
+		return error_reply ("the bus could not be added");
+	}
+	return "{\"ok\":true,\"strip\":" + strip_json (added.front ()) + "}";
+}
+
+static std::string
+m_routes_remove (Params& p)
+{
+	std::string e = require_session ();
+	if (!e.empty ()) {
+		return e;
+	}
+	std::shared_ptr<Route> r = find_route (p["id"]);
+	if (!r) {
+		return error_reply ("no such track or bus");
+	}
+	if (r->is_master () || r->is_monitor ()) {
+		return error_reply ("the master bus cannot be removed");
+	}
+	session->remove_route (r);
+	return "{\"ok\":true}";
+}
+
 static std::string
 m_meters ()
 {
@@ -668,8 +883,7 @@ m_meters ()
 	}
 	std::string j = "{\"ok\":true,\"meters\":[";
 	bool first = true;
-	std::shared_ptr<RouteList> tracks = session->get_tracks ();
-	for (auto const& r : *tracks) {
+	for (auto const& r : mixer_routes ()) {
 		std::shared_ptr<PeakMeter> meter = r->peak_meter ();
 		j += first ? "" : ",";
 		j += "{\"id\":" + q (r->id ().to_s ()) + ",\"peak\":[";
@@ -684,6 +898,310 @@ m_meters ()
 	}
 	j += "]}";
 	return j;
+}
+
+/* ---------------------------------------------------------------------------
+ * timeline
+ */
+
+static samplepos_t
+param_samples (Params& p, std::string const& key, samplepos_t dflt)
+{
+	if (!p.count (key) || p[key].empty ()) {
+		return dflt;
+	}
+	return (samplepos_t) std::max (0.0, atof (p[key].c_str ()));
+}
+
+static std::string
+region_json (std::shared_ptr<Region> const& r)
+{
+	std::string j = "{\"id\":" + q (r->id ().to_s ());
+	j += ",\"name\":" + q (r->name ());
+	j += ",\"position\":" + std::to_string ((long long) r->position ().samples ());
+	j += ",\"length\":" + std::to_string ((long long) r->length ().samples ());
+	j += ",\"start\":" + std::to_string ((long long) r->start ().samples ());
+	j += ",\"layer\":" + std::to_string ((long long) r->layer ());
+	j += std::string (",\"muted\":") + (r->muted () ? "true" : "false");
+	j += "}";
+	return j;
+}
+
+/* a region and the playlist that holds it, looked up by the region's id */
+static std::shared_ptr<Region>
+find_region (std::string const& id, std::shared_ptr<Playlist>& playlist)
+{
+	if (id.empty ()) {
+		return std::shared_ptr<Region> ();
+	}
+	PBD::ID rid (id);
+	for (auto const& t : tracks_in_order ()) {
+		std::shared_ptr<Playlist> pl = t->playlist ();
+		if (!pl) {
+			continue;
+		}
+		std::shared_ptr<Region> r = pl->region_by_id (rid);
+		if (r) {
+			playlist = pl;
+			return r;
+		}
+	}
+	return std::shared_ptr<Region> ();
+}
+
+static std::string
+m_timeline ()
+{
+	std::string e = require_session ();
+	if (!e.empty ()) {
+		return e;
+	}
+	samplepos_t end = session->current_end_sample ();
+	std::string tracks;
+	bool        first = true;
+	for (auto const& t : tracks_in_order ()) {
+		tracks += first ? "" : ",";
+		first = false;
+		tracks += "{\"id\":" + q (t->id ().to_s ()) + ",\"name\":" + q (t->name ());
+		tracks += ",\"kind\":" + q (strip_kind (t)) + ",\"regions\":[";
+		std::shared_ptr<Playlist> pl = t->playlist ();
+		if (pl) {
+			bool rfirst = true;
+			std::shared_ptr<RegionList> regions = pl->region_list ();
+			for (auto const& r : *regions) {
+				tracks += (rfirst ? "" : ",") + region_json (r);
+				rfirst = false;
+				end = std::max (end, r->position ().samples () + r->length ().samples ());
+			}
+		}
+		tracks += "]}";
+	}
+	std::string j = "{\"ok\":true";
+	j += ",\"sample_rate\":" + std::to_string ((long long) session->sample_rate ());
+	j += ",\"position\":" + std::to_string ((long long) session->transport_sample ());
+	j += ",\"end\":" + std::to_string ((long long) end);
+	j += ",\"tracks\":[" + tracks + "]}";
+	return j;
+}
+
+/* Writes a sine tone into new session sources and places a region of it on
+ * an audio track: a way to put material on the timeline without a file
+ * picker or an input to record from.
+ */
+static std::string
+m_regions_tone (Params& p)
+{
+	std::string e = require_session ();
+	if (!e.empty ()) {
+		return e;
+	}
+	std::shared_ptr<AudioTrack> track = std::dynamic_pointer_cast<AudioTrack> (find_route (p["track"]));
+	if (!track || !track->playlist ()) {
+		return error_reply ("no such audio track");
+	}
+	double const sr      = session->sample_rate ();
+	double const seconds = p["seconds"].empty () ? 2.0 : atof (p["seconds"].c_str ());
+	double const freq    = p["frequency"].empty () ? 440.0 : atof (p["frequency"].c_str ());
+	if (seconds <= 0 || seconds > 600) {
+		return error_reply ("seconds must be between 0 and 600");
+	}
+	if (freq <= 0 || freq >= sr / 2) {
+		return error_reply ("the frequency is out of range");
+	}
+	samplepos_t const position = param_samples (p, "position", session->transport_sample ());
+	samplecnt_t const length   = (samplecnt_t) (seconds * sr);
+	samplecnt_t const fade     = std::min<samplecnt_t> (length / 4, (samplecnt_t) (sr * 0.01));
+	uint32_t const    nchans   = std::max<uint32_t> (1, track->n_inputs ().n_audio ());
+
+	SourceList sources;
+	for (uint32_t c = 0; c < nchans; ++c) {
+		std::shared_ptr<AudioFileSource> src =
+			session->create_audio_source_for_session (nchans, track->name () + "-tone", c);
+		if (!src) {
+			return error_reply ("cannot create an audio file in the session");
+		}
+		sources.push_back (src);
+	}
+
+	const samplecnt_t  block = 4096;
+	std::vector<Sample> buf (block);
+	for (auto const& s : sources) {
+		std::shared_ptr<AudioSource> as = std::dynamic_pointer_cast<AudioSource> (s);
+		for (samplecnt_t done = 0; done < length; done += block) {
+			samplecnt_t n = std::min (block, length - done);
+			for (samplecnt_t i = 0; i < n; ++i) {
+				samplecnt_t k   = done + i;
+				double      amp = 0.5;
+				if (k < fade) {
+					amp *= (double) k / fade;
+				} else if (k > length - fade) {
+					amp *= (double) (length - k) / fade;
+				}
+				buf[i] = (Sample) (amp * sin (2.0 * M_PI * freq * k / sr));
+			}
+			if (as->write (&buf[0], n) != n) {
+				return error_reply ("writing the tone failed");
+			}
+		}
+		std::shared_ptr<AudioFileSource> afs = std::dynamic_pointer_cast<AudioFileSource> (s);
+		afs->flush ();
+		{
+			Source::WriterLock lock (as->mutex ());
+			as->mark_streaming_write_completed (lock, timecnt_t ());
+		}
+		as->done_with_peakfile_writes ();
+		afs->mark_immutable ();
+	}
+
+	std::shared_ptr<FileSource> fs = std::dynamic_pointer_cast<FileSource> (sources.front ());
+	std::string region_name = region_name_from_path (fs->path (), true, false);
+
+	PropertyList plist;
+	plist.add (ARDOUR::Properties::start, samplepos_t (0));
+	plist.add (ARDOUR::Properties::length, length);
+	plist.add (ARDOUR::Properties::name, region_name);
+	plist.add (ARDOUR::Properties::layer, 0);
+	plist.add (ARDOUR::Properties::whole_file, true);
+	plist.add (ARDOUR::Properties::external, false);
+	plist.add (ARDOUR::Properties::opaque, true);
+	std::shared_ptr<Region> whole = RegionFactory::create (sources, plist);
+
+	PropertyList plist2;
+	plist2.add (ARDOUR::Properties::whole_file, false);
+	std::shared_ptr<Region> region = RegionFactory::create (whole, plist2);
+
+	std::shared_ptr<Playlist> pl = track->playlist ();
+	pl->clear_changes ();
+	pl->add_region (region, timepos_t (position));
+	return "{\"ok\":true,\"region\":" + region_json (region) + "}";
+}
+
+static std::string
+m_region_move (Params& p)
+{
+	std::string e = require_session ();
+	if (!e.empty ()) {
+		return e;
+	}
+	std::shared_ptr<Playlist> pl;
+	std::shared_ptr<Region>   r = find_region (p["id"], pl);
+	if (!r) {
+		return error_reply ("no such region");
+	}
+	if (p.count ("track") && !p["track"].empty () && p["track"] != "null") {
+		std::shared_ptr<Track> to = std::dynamic_pointer_cast<Track> (find_route (p["track"]));
+		if (!to || !to->playlist ()) {
+			return error_reply ("no such track");
+		}
+		if (to->data_type () != r->data_type ()) {
+			return error_reply ("the region does not fit that kind of track");
+		}
+		if (to->playlist () != pl) {
+			samplepos_t pos = param_samples (p, "position", r->position ().samples ());
+			pl->clear_changes ();
+			pl->remove_region (r);
+			to->playlist ()->clear_changes ();
+			to->playlist ()->add_region (r, timepos_t (pos));
+			return "{\"ok\":true,\"region\":" + region_json (r) + "}";
+		}
+	}
+	if (p.count ("position")) {
+		r->clear_changes ();
+		r->set_position (timepos_t (param_samples (p, "position", 0)));
+	}
+	return "{\"ok\":true,\"region\":" + region_json (r) + "}";
+}
+
+static std::string
+m_region_split (Params& p)
+{
+	std::string e = require_session ();
+	if (!e.empty ()) {
+		return e;
+	}
+	std::shared_ptr<Playlist> pl;
+	std::shared_ptr<Region>   r = find_region (p["id"], pl);
+	if (!r) {
+		return error_reply ("no such region");
+	}
+	samplepos_t at    = param_samples (p, "position", session->transport_sample ());
+	samplepos_t start = r->position ().samples ();
+	if (at <= start || at >= start + r->length ().samples ()) {
+		return error_reply ("the split point is outside the region");
+	}
+	pl->clear_changes ();
+	pl->split_region (r, timepos_t (at));
+	return "{\"ok\":true}";
+}
+
+static std::string
+m_region_remove (Params& p)
+{
+	std::string e = require_session ();
+	if (!e.empty ()) {
+		return e;
+	}
+	std::shared_ptr<Playlist> pl;
+	std::shared_ptr<Region>   r = find_region (p["id"], pl);
+	if (!r) {
+		return error_reply ("no such region");
+	}
+	pl->clear_changes ();
+	pl->remove_region (r);
+	return "{\"ok\":true}";
+}
+
+static std::string
+m_region_mute (Params& p)
+{
+	std::string e = require_session ();
+	if (!e.empty ()) {
+		return e;
+	}
+	std::shared_ptr<Playlist> pl;
+	std::shared_ptr<Region>   r = find_region (p["id"], pl);
+	if (!r) {
+		return error_reply ("no such region");
+	}
+	r->set_muted (truthy (p["muted"]));
+	return "{\"ok\":true,\"region\":" + region_json (r) + "}";
+}
+
+/* the waveform of a region's first channel as count min/max pairs */
+static std::string
+m_region_peaks (Params& p)
+{
+	std::string e = require_session ();
+	if (!e.empty ()) {
+		return e;
+	}
+	std::shared_ptr<Playlist> pl;
+	std::shared_ptr<AudioRegion> r = std::dynamic_pointer_cast<AudioRegion> (find_region (p["id"], pl));
+	if (!r) {
+		return error_reply ("no such audio region");
+	}
+	int count = p["count"].empty () ? 200 : atoi (p["count"].c_str ());
+	count     = std::max (1, std::min (count, 4000));
+	samplecnt_t len = r->length ().samples ();
+	std::vector<PeakData> peaks (count);
+	samplecnt_t got = r->read_peaks (&peaks[0], count, 0, len, 0, (double) len / count);
+	std::string j = "{\"ok\":true,\"peaks\":[";
+	for (samplecnt_t i = 0; i < got; ++i) {
+		j += (i ? "," : "") + num (peaks[i].min) + "," + num (peaks[i].max);
+	}
+	j += "]}";
+	return j;
+}
+
+static std::string
+m_transport_locate (Params& p)
+{
+	std::string e = require_session ();
+	if (!e.empty ()) {
+		return e;
+	}
+	session->request_locate (param_samples (p, "position", 0), false, RollIfAppropriate, TRS_UI);
+	return transport_json ();
 }
 
 static std::string
@@ -706,6 +1224,18 @@ dispatch (std::string const& method, Params& p)
 	if (method == "tracks.list")     return m_tracks_list ();
 	if (method == "tracks.add")      return m_tracks_add (p);
 	if (method == "meters")          return m_meters ();
+	if (method == "tracks.remove")   return m_routes_remove (p);
+	if (method == "buses.add")       return m_buses_add (p);
+	if (method == "mixer.strips")    return m_mixer_strips ();
+	if (method == "strip.set")       return m_strip_set (p);
+	if (method == "timeline")        return m_timeline ();
+	if (method == "regions.tone")    return m_regions_tone (p);
+	if (method == "region.move")     return m_region_move (p);
+	if (method == "region.split")    return m_region_split (p);
+	if (method == "region.remove")   return m_region_remove (p);
+	if (method == "region.mute")     return m_region_mute (p);
+	if (method == "region.peaks")    return m_region_peaks (p);
+	if (method == "transport.locate") return m_transport_locate (p);
 	return error_reply ("unknown method '" + method + "'");
 }
 
