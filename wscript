@@ -1087,6 +1087,8 @@ def options(opt):
                     help='Path to the Android NDK (required for --dist-target=android; ANDROID_NDK_ROOT is used if unset)')
     opt.add_option('--android-api', type='int', action='store', default=28, dest='android_api',
                     help='Android API level to build against (default 28: AAudio needs 26, and iconv is in bionic from 28 on)')
+    opt.add_option('--android-deps', type='string', action='store', default='', dest='android_deps',
+                    help='Prefix of the Android dependency stack built by tools/android/build-deps.sh (ANDROID_DEPS is used if unset)')
     opt.add_option('--with-frontends', type='string', action='store', default='all', dest='with_frontends',
                     help='Which frontends to build: all (default), or a comma-separated list of gtk,headless,lua,utils, or none')
     opt.add_option('--no-tk-stack', action='store_true', default=False, dest='no_tk_stack',
@@ -1304,6 +1306,22 @@ def configure(conf):
         autowaf.display_msg(conf, 'Will build against private Ardour dependency stack in ' + user_ardour_root, 'yes')
     else:
         autowaf.display_msg(conf, 'Will build against private Ardour dependency stack', 'no')
+
+    # The Android dependency stack (tools/android/build-deps.sh) is a prefix
+    # of its own: its headers include boost, which has no .pc file, and
+    # pkg-config must not see the host's libraries.
+    if Options.options.dist_target == 'android' or Options.options.dist_target.startswith ('android-'):
+        android_deps = Options.options.android_deps or os.getenv ('ANDROID_DEPS')
+        if not android_deps or not os.path.isdir (os.path.join (android_deps, 'lib', 'pkgconfig')):
+            conf.fatal ("--dist-target=android needs the dependency stack: pass --android-deps=<prefix> (see tools/android/build-deps.sh)")
+        android_deps = os.path.abspath (os.path.expanduser (android_deps))
+        conf.env.append_value('CFLAGS', [ '-I' + android_deps + '/include' ])
+        conf.env.append_value('CXXFLAGS', [ '-I' + android_deps + '/include' ])
+        conf.env.append_value('LINKFLAGS', [ '-L' + android_deps + '/lib' ])
+        os.environ['PKG_CONFIG_LIBDIR'] = android_deps + '/lib/pkgconfig:' + android_deps + '/share/pkgconfig'
+        os.environ.pop ('PKG_CONFIG_PATH', None)
+        conf.env['ANDROID_DEPS'] = android_deps
+        autowaf.display_msg(conf, 'Android dependency stack', android_deps)
 
     # ---------------------------------------------------------------------
     # Resolve the platform we are building *for*, and which frontends and

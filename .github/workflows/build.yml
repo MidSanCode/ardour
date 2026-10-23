@@ -1103,9 +1103,9 @@ jobs:
       - name: Configure
         run: |
           set -euxo pipefail
-          export PKG_CONFIG_LIBDIR="$DEPS/lib/pkgconfig:$DEPS/share/pkgconfig"
           ./waf configure --out=build-android \
             --dist-target=android-${{ matrix.abi }} --with-ndk="$ANDROID_NDK_ROOT" --android-api=$ANDROID_API \
+            --android-deps="$DEPS" \
             --with-frontends=none --no-tk-stack --no-surfaces --with-backends=aaudio,dummy \
             --cxx17 --no-nls --no-lrdf --no-lxvst --no-vst3 --no-windows-vst --no-execstack --no-dr-mingw \
             --prefix=/ardour 2>&1 | tee android-configure.log
