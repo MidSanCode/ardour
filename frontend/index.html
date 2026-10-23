@@ -9,12 +9,26 @@
 <body>
 <header>
   <h1>Ardour</h1>
+  <span id="current" class="session-name">no session</span>
   <span id="engine" class="badge">engine: starting&hellip;</span>
 </header>
 
-<section id="sessions">
-  <h2>Session</h2>
-  <p id="current">no session loaded</p>
+<div id="transport" class="bar">
+  <button id="home" disabled title="Go to start">&#9198;</button>
+  <button id="play" disabled>&#9654;</button>
+  <button id="stop" disabled>&#9632;</button>
+  <span id="clock">00:00:00.000</span>
+</div>
+
+<nav id="tabs">
+  <button data-view="session" class="active">Session</button>
+  <button data-view="editor" disabled>Editor</button>
+  <button data-view="mixer" disabled>Mixer</button>
+</nav>
+
+<main>
+<section id="view-session" class="view active">
+  <h2>Sessions</h2>
   <form id="create">
     <input id="new-name" placeholder="new session name" autocomplete="off" required>
     <button type="submit">Create</button>
@@ -26,27 +40,46 @@
   </div>
 </section>
 
-<section id="transport">
-  <h2>Transport</h2>
-  <div class="row">
-    <button id="play" disabled>&#9654; Play</button>
-    <button id="stop" disabled>&#9632; Stop</button>
-    <span id="clock">00:00:00.000</span>
+<section id="view-editor" class="view">
+  <div class="bar wrap">
+    <form id="add-track">
+      <input id="track-name" placeholder="track name" value="Audio" autocomplete="off">
+      <select id="track-channels">
+        <option value="1">mono</option>
+        <option value="2">stereo</option>
+      </select>
+      <button type="submit">+ Track</button>
+    </form>
   </div>
+  <div class="bar wrap" id="region-tools">
+    <button id="tone" title="Insert a test tone on the selected track at the playhead">+ Tone</button>
+    <button id="split" disabled>Split</button>
+    <button id="mute-region" disabled>Mute</button>
+    <button id="delete-region" disabled>Delete</button>
+    <span class="spacer"></span>
+    <button id="zoom-out" title="Zoom out">&minus;</button>
+    <button id="zoom-in" title="Zoom in">+</button>
+  </div>
+  <div id="timeline">
+    <div id="track-heads"></div>
+    <div id="lanes-scroll">
+      <div id="lanes">
+        <div id="ruler"></div>
+        <div id="lane-rows"></div>
+        <div id="playhead"></div>
+      </div>
+    </div>
+  </div>
+  <p class="hint">Tap a lane to move the playhead, tap a region to select it, drag it to move it (onto another track too).</p>
 </section>
 
-<section id="tracks">
-  <h2>Tracks</h2>
-  <form id="add-track">
-    <input id="track-name" placeholder="track name" value="Audio" autocomplete="off">
-    <select id="track-channels">
-      <option value="1">mono</option>
-      <option value="2">stereo</option>
-    </select>
-    <button type="submit" disabled>Add audio track</button>
-  </form>
-  <ul id="track-list"></ul>
+<section id="view-mixer" class="view">
+  <div class="bar wrap">
+    <button id="add-bus">+ Bus</button>
+  </div>
+  <div id="strips"></div>
 </section>
+</main>
 
 <p id="message" role="status"></p>
 
