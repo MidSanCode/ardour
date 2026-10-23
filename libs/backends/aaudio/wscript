@@ -33,6 +33,8 @@ def build(bld):
     obj.target   = 'aaudio_audiobackend'
     obj.use      = ['aaudio_device', 'libardour', 'libpbd']
     obj.uselib   = 'GLIBMM XML'
+    # the wrapper is a static library: whoever links it links libaaudio
+    obj.linkflags = ['-laaudio']
     obj.install_path  = os.path.join(bld.env['LIBDIR'], 'backends')
     obj.defines = ['PACKAGE="' + I18N_PACKAGE + '"',
                    'ARDOURBACKEND_DLL_EXPORTS'

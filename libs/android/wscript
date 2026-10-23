@@ -24,7 +24,7 @@ def build(bld):
     obj.target   = 'ardour_android'
     obj.use      = ['libardour', 'libpbd', 'libtemporal', 'libevoral', 'aaudio_device']
     obj.uselib   = ['GLIBMM', 'GIOMM', 'SIGCPP', 'XML', 'LO', 'TAGLIB', 'SNDFILE']
-    obj.linkflags = ['-llog']
+    obj.linkflags = ['-llog', '-laaudio']
     obj.install_path  = os.path.join(bld.env['LIBDIR'])
     obj.defines = [
             'ARDOUR_ANDROID_VERSION="' + str (bld.env['VERSION'] or 'unknown') + '"',
