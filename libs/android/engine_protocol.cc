@@ -1056,7 +1056,7 @@ m_regions_tone (Params& p)
 	std::shared_ptr<FileSource> fs = std::dynamic_pointer_cast<FileSource> (sources.front ());
 	std::string region_name = region_name_from_path (fs->path (), true, false);
 
-	PropertyList plist;
+	PBD::PropertyList plist;
 	plist.add (ARDOUR::Properties::start, samplepos_t (0));
 	plist.add (ARDOUR::Properties::length, length);
 	plist.add (ARDOUR::Properties::name, region_name);
@@ -1066,7 +1066,7 @@ m_regions_tone (Params& p)
 	plist.add (ARDOUR::Properties::opaque, true);
 	std::shared_ptr<Region> whole = RegionFactory::create (sources, plist);
 
-	PropertyList plist2;
+	PBD::PropertyList plist2;
 	plist2.add (ARDOUR::Properties::whole_file, false);
 	std::shared_ptr<Region> region = RegionFactory::create (whole, plist2);
 
