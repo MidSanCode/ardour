@@ -1317,6 +1317,9 @@ def configure(conf):
         android_deps = os.path.abspath (os.path.expanduser (android_deps))
         conf.env.append_value('CFLAGS', [ '-I' + android_deps + '/include' ])
         conf.env.append_value('CXXFLAGS', [ '-I' + android_deps + '/include' ])
+        # boost (1.74 on the CI hosts) still uses std::unary_function, which
+        # the NDK's libc++ removes in C++17 unless asked to keep it
+        conf.env.append_value('CXXFLAGS', [ '-D_LIBCPP_ENABLE_CXX17_REMOVED_UNARY_BINARY_FUNCTION' ])
         conf.env.append_value('LINKFLAGS', [ '-L' + android_deps + '/lib' ])
         os.environ['PKG_CONFIG_LIBDIR'] = android_deps + '/lib/pkgconfig:' + android_deps + '/share/pkgconfig'
         os.environ.pop ('PKG_CONFIG_PATH', None)
