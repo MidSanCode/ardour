@@ -1107,7 +1107,7 @@ jobs:
           ./waf configure --out=build-android \
             --dist-target=android-${{ matrix.abi }} --with-ndk="$ANDROID_NDK_ROOT" --android-api=$ANDROID_API \
             --with-frontends=none --no-tk-stack --no-surfaces --with-backends=aaudio,dummy \
-            --cxx17 --no-nls --no-lrdf --no-execstack --no-dr-mingw \
+            --cxx17 --no-nls --no-lrdf --no-lxvst --no-vst3 --no-windows-vst --no-execstack --no-dr-mingw \
             --prefix=/ardour 2>&1 | tee android-configure.log
           grep -q "Android target: ABI .*, API level $ANDROID_API, backends: aaudio, dummy" android-configure.log
 
@@ -1127,12 +1127,25 @@ jobs:
           tools/android/collect-engine.sh "$PWD/stage-android/ardour" "$DEPS" "$PWD/engine-${{ matrix.abi }}"
           ls -l "engine-${{ matrix.abi }}/jniLibs/${{ matrix.abi }}"
 
+      - name: Report the end of the failing log
+        if: failure()
+        run: |
+          # the tail of whichever log was being written, as an annotation, so
+          # that the failure can be read without downloading the logs
+          for f in android-build.log android-configure.log "$RUNNER_TEMP/deps.log"; do
+            if [ -s "$f" ]; then
+              echo "::error title=$(basename "$f")::$(tail -n 60 "$f" | sed 's/%/%25/g' | sed ':a;N;$!ba;s/\n/%0A/g')"
+              break
+            fi
+          done
+
       - name: Upload the logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: android-logs-${{ matrix.abi }}
           path: |
+            ${{ runner.temp }}/deps.log
             android-configure.log
             android-build.log
             build-android/config.log
@@ -1143,3 +1156,109 @@ jobs:
         with:
           name: android-engine-${{ matrix.abi }}
           path: engine-${{ matrix.abi }}
+
+  # ---------------------------------------------------------------------------
+  # Android: the application.  Both engines go into one APK (jniLibs/<abi>),
+  # with the engine's data files and the shared frontend as assets.
+  android-apk:
+    name: Android application
+    if: inputs.android
+    needs: android
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install the platform
+        run: |
+          set -eux
+          SDK="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+          yes | "$SDK/cmdline-tools/latest/bin/sdkmanager" --install "platforms;android-34" "build-tools;34.0.0" > /dev/null
+
+      - name: Fetch the engines
+        uses: actions/download-artifact@v4
+        with:
+          pattern: android-engine-*
+          path: engines
+
+      - name: Put the engines into the Gradle project
+        run: |
+          set -eux
+          for abi in arm64-v8a x86_64; do
+            mkdir -p android/app/src/main/jniLibs
+            cp -a "engines/android-engine-$abi/jniLibs/$abi" android/app/src/main/jniLibs/
+          done
+          # the data files are architecture independent
+          mkdir -p android/app/src/main/engine-assets
+          cp -a engines/android-engine-x86_64/assets/ardour android/app/src/main/engine-assets/ || true
+          du -sh android/app/src/main/jniLibs/* android/app/src/main/engine-assets
+
+      - name: Build the APK
+        run: |
+          set -eux
+          # The gradle wrapper jar is a binary and is not committed, so a
+          # pinned distribution is used instead.
+          GRADLE_VERSION=8.7
+          curl -fsSL -o /tmp/gradle.zip "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip"
+          unzip -q /tmp/gradle.zip -d /opt
+          cd android
+          /opt/gradle-${GRADLE_VERSION}/bin/gradle --no-daemon assembleDebug
+          ls -l app/build/outputs/apk/debug/
+          unzip -l app/build/outputs/apk/debug/app-debug.apk | grep -E 'lib/(arm64-v8a|x86_64)/libardour(_android)?\.so|assets/web/index.html'
+
+      - name: Upload the APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: ardour-android-apk
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+
+  # ---------------------------------------------------------------------------
+  # Android: install the APK on an x86_64 emulator and run the smoke test,
+  # which initialises the engine, creates a session, adds a track and rolls
+  # the transport through the frontend protocol (SmokeTest.kt).
+  android-emulator:
+    name: Android emulator smoke test
+    if: inputs.android
+    needs: android-apk
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    steps:
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Fetch the APK
+        uses: actions/download-artifact@v4
+        with:
+          name: ardour-android-apk
+
+      - name: Run the smoke test
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 30
+          arch: x86_64
+          target: google_apis
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim
+          script: |
+            adb install -r app-debug.apk
+            adb logcat -c
+            adb shell am start -n org.ardour.ardour/.MainActivity --ez smoketest true
+            for i in $(seq 1 90); do sleep 2; if adb logcat -d -s ArdourSmoke:I | grep -q 'ARDOUR_SMOKE'; then break; fi; done
+            adb logcat -d > logcat.txt
+            grep -E 'ArdourSmoke|ArdourEngine|ardour' logcat.txt | tail -80
+            grep -q 'ARDOUR_SMOKE PASS' logcat.txt
+
+      - name: Upload the log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-emulator-logcat
+          path: logcat.txt
+          if-no-files-found: ignore
