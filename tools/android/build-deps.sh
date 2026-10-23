@@ -209,7 +209,7 @@ cmake_pkg samplerate https://github.com/libsndfile/libsamplerate/releases/downlo
 
 if [ "$CPU_FAMILY" = aarch64 ]; then FFTW_SIMD=-DENABLE_NEON=ON; else FFTW_SIMD=-DENABLE_SSE2=ON; fi
 cmake_pkg fftw3f https://www.fftw.org/fftw-3.3.10.tar.gz \
-	-DENABLE_FLOAT=ON -DENABLE_THREADS=ON -DWITH_COMBINED_THREADS=ON \
+	-DENABLE_FLOAT=ON -DENABLE_THREADS=ON -DWITH_COMBINED_THREADS=OFF \
 	-DBUILD_TESTS=OFF $FFTW_SIMD
 
 # --- files, network, metadata -------------------------------------------------
