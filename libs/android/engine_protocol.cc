@@ -276,12 +276,17 @@ class BridgeEventLoop : public PBD::EventLoop
 public:
 	BridgeEventLoop () : PBD::EventLoop ("bridge"), _thread (pthread_self ()) {}
 
+	/* A slot from another thread is refused rather than dropped, so that the
+	 * caller can fall back: the process thread then hands the clean-up of a
+	 * realtime session event to the butler instead of leaking the event.
+	 */
 	bool call_slot (PBD::EventLoop::InvalidationRecord*, const std::function<void()>& f)
 	{
 		if (pthread_equal (pthread_self (), _thread)) {
 			f ();
+			return true;
 		}
-		return true;
+		return false;
 	}
 
 	PBD::RWLock& slot_invalidation_rwlock () { return _lock; }
@@ -788,8 +793,9 @@ m_mixer_strips ()
 }
 
 /* Mute, solo and record-arm are applied by the process thread through the
- * session's realtime event queue; wait (briefly) for the change to land so
- * the reply describes the new state.
+ * session's realtime event queue, which waits while the butler finishes
+ * non-realtime work (after adding a route, say); wait for the change to land,
+ * up to two seconds, so the reply describes the new state.
  */
 static void
 set_control (std::shared_ptr<AutomationControl> c, double v)
@@ -798,8 +804,12 @@ set_control (std::shared_ptr<AutomationControl> c, double v)
 		return;
 	}
 	c->set_value (v, PBD::Controllable::NoGroup);
-	for (int i = 0; i < 100 && fabs (c->get_value () - v) > 1e-4 * std::max (1.0, fabs (v)); ++i) {
-		g_usleep (2000);
+	for (int i = 0; fabs (c->get_value () - v) > 1e-4 * std::max (1.0, fabs (v)); ++i) {
+		if (i == 400) {
+			log (LogWarning, "control '" + c->name () + "' did not take its new value within 2 s");
+			break;
+		}
+		g_usleep (5000);
 	}
 }
 
