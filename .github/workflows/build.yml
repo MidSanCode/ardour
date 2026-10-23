@@ -1048,20 +1048,17 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Install the Android SDK
-        uses: android-actions/setup-android@v3
-        with:
-          # The default package list of the action contains "tools", which the
-          # SDK repository does not serve any more: the action fails on it
-          # before it installs anything.
-          packages: 'platform-tools'
-
       - name: Install the NDK
         run: |
           set -eux
+          # The runner image carries the Android SDK and its command line
+          # tools; android-actions/setup-android is not needed (and fails now
+          # that its Node 20 runtime is forced onto Node 24).
           SDK="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
-          sdkmanager --install "ndk;26.1.10909125"
+          SDKMANAGER="$SDK/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKMANAGER" --install "ndk;26.1.10909125" > /dev/null
           echo "ANDROID_NDK_ROOT=$SDK/ndk/26.1.10909125" >> "$GITHUB_ENV"
+          ls "$SDK/ndk/26.1.10909125/toolchains/llvm/prebuilt/linux-x86_64/bin" | grep -c android28-clang
 
       - name: Install the host tools
         run: |
