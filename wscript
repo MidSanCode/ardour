@@ -1507,10 +1507,10 @@ def configure(conf):
               mandatory = True,
               msg = 'Checking for boost library >= 1.68')
 
-    if re.search ("linux", sys.platform) is not None and Options.options.dist_target != 'mingw':
+    if conf.env['TARGET_OS'] == 'linux':
         autowaf.check_pkg(conf, 'alsa', uselib_store='ALSA')
 
-    if re.search ("linux", sys.platform) is not None and Options.options.dist_target != 'mingw':
+    if conf.env['TARGET_OS'] == 'linux':
         autowaf.check_pkg(conf, 'libpulse', uselib_store='PULSEAUDIO', mandatory=False)
 
     if re.search ("openbsd", sys.platform) is not None:
@@ -1747,7 +1747,7 @@ int main () { __int128 x = 0; return 0; }
         conf.define('NO_THREADED_WAVEVIEWS', 1)
         conf.env['NO_THREADED_WAVEVIEWS'] = True
     if not opts.no_futex_semaphore:
-        if re.search ("linux", sys.platform) is not None and Options.options.dist_target != 'mingw':
+        if conf.env['TARGET_OS'] == 'linux':
             have_sys_futex = conf.check_cc(
                     msg="Checking for 'futex' syscall support",
                     features  = 'c',
@@ -1803,7 +1803,7 @@ int main () { __int128 x = 0; return 0; }
         conf.fatal("Must configure and build at least one backend")
 
     if (Options.options.use_lld):
-        if re.search ("linux", sys.platform) is not None and Options.options.dist_target != 'mingw' and conf.env['BUILD_PABACKEND']:
+        if conf.env['TARGET_OS'] == 'linux' and conf.env['BUILD_PABACKEND']:
             conf.fatal("lld is only for Linux builds")
         else:
             if Options.options.dist_target != 'msvc':

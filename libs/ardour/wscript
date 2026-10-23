@@ -353,7 +353,7 @@ def configure(conf):
     conf.check(header_name='sys/vfs.h', define_name='HAVE_SYS_VFS_H',mandatory=False)
     conf.check(header_name='sys/statvfs.h', define_name='HAVE_SYS_STATVFS_H',mandatory=False)
 
-    if re.search ("linux", sys.platform) is not None and Options.options.dist_target != 'mingw':
+    if conf.env['TARGET_OS'] == 'linux':
         have_sys_ioprio = conf.check_cc(
                 msg="Checking for 'ioprio_set' syscall support",
                 features  = 'c',

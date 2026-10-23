@@ -9,12 +9,12 @@ def options(opt):
     pass
 
 def configure(conf):
-    if re.search ("linux", sys.platform) != None and Options.options.dist_target != 'mingw':
+    if conf.env['TARGET_OS'] == 'linux':
         autowaf.check_pkg(conf, 'alsa', uselib_store='ALSA')
         autowaf.check_pkg(conf, 'dbus-1', uselib_store='DBUS', mandatory = False)
 
 def build(bld):
-    if re.search ("linux", sys.platform) != None:
+    if bld.env['TARGET_OS'] == 'linux':
         if bld.is_defined('HAVE_ALSA'):
             obj = bld(features = 'cxx cxxshlib')
             obj.source = [
