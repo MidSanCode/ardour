@@ -10,18 +10,21 @@ def configure(conf):
     pass
 
 def build(bld):
-    # The JNI bridge.  It is deliberately free of any Ardour dependency: it
-    # only needs the AAudio wrapper, so that it can be built (and checked)
-    # without the cross-compiled dependency stack of the engine.  When the
-    # engine state is added, this target grows a dependency on libardour.
+    # The JNI bridge: the platform independent protocol over libardour
+    # (engine_protocol.cc, shared with the iOS and wasm hosts later) and its
+    # JNI adapter.  It also links the AAudio wrapper directly, to list the
+    # devices before the engine is started.
     obj = bld(features = 'cxx cxxshlib')
     obj.source = [
+            'engine_protocol.cc',
             'ardour_android.cc',
             ]
     obj.includes = ['.']
     obj.name     = 'ardour_android'
     obj.target   = 'ardour_android'
-    obj.use      = ['aaudio_device']
+    obj.use      = ['libardour', 'libpbd', 'libtemporal', 'libevoral', 'aaudio_device']
+    obj.uselib   = ['GLIBMM', 'GIOMM', 'SIGCPP', 'XML', 'LO', 'TAGLIB', 'SNDFILE']
+    obj.linkflags = ['-llog']
     obj.install_path  = os.path.join(bld.env['LIBDIR'])
     obj.defines = [
             'ARDOUR_ANDROID_VERSION="' + bld.env.get('VERSION', 'unknown') + '"',
