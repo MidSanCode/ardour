@@ -20,6 +20,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <algorithm>
+#include <cassert>
+#include <set>
 
 #include <glibmm.h>
 #include <pthread.h>
@@ -86,6 +88,62 @@ AAudioAudioPort::get_buffer (pframes_t nframes)
 		}
 	}
 	return _buffer;
+}
+
+AAudioMidiEvent::AAudioMidiEvent (const pframes_t timestamp, const uint8_t* data, size_t size)
+	: _size (size)
+	, _timestamp (timestamp)
+{
+	if (size > 0 && size < max_size) {
+		memcpy (_data, data, size);
+	} else {
+		_size = 0;
+	}
+}
+
+AAudioMidiEvent::AAudioMidiEvent (const AAudioMidiEvent& other)
+	: _size (other._size)
+	, _timestamp (other._timestamp)
+{
+	if (_size > 0) {
+		memcpy (_data, other._data, _size);
+	}
+}
+
+AAudioMidiPort::AAudioMidiPort (AAudioBackend& b, const std::string& name, PortFlags flags)
+	: BackendPort (b, name, flags)
+{
+	_buffer.reserve (256);
+}
+
+AAudioMidiPort::~AAudioMidiPort ()
+{
+}
+
+struct AAudioMidiEventSorter {
+	bool operator() (AAudioMidiEvent const& a, AAudioMidiEvent const& b) const
+	{
+		return a < b;
+	}
+};
+
+void*
+AAudioMidiPort::get_buffer (pframes_t /* nframes */)
+{
+	if (is_input ()) {
+		_buffer.clear ();
+		const std::set<BackendPortPtr>& connections = get_connections ();
+		for (std::set<BackendPortPtr>::const_iterator i = connections.begin (); i != connections.end (); ++i) {
+			std::shared_ptr<const AAudioMidiPort> source = std::dynamic_pointer_cast<const AAudioMidiPort> (*i);
+			if (!source) {
+				continue;
+			}
+			const AAudioMidiBuffer* src = source->const_buffer ();
+			_buffer.insert (_buffer.end (), src->begin (), src->end ());
+		}
+		std::stable_sort (_buffer.begin (), _buffer.end (), AAudioMidiEventSorter ());
+	}
+	return &_buffer;
 }
 
 /* ---------------------------------------------------------------------- */
@@ -417,24 +475,41 @@ AAudioBackend::my_name () const
 int
 AAudioBackend::midi_event_get (pframes_t& timestamp, size_t& size, uint8_t const** buf, void* port_buffer, uint32_t event_index)
 {
+	assert (buf && port_buffer);
+	AAudioMidiBuffer const& source = *static_cast<AAudioMidiBuffer const*> (port_buffer);
+	if (event_index >= source.size ()) {
+		return -1;
+	}
+	AAudioMidiEvent const& event = source[event_index];
+	timestamp = event.timestamp ();
+	size      = event.size ();
+	*buf      = event.data ();
 	return 0;
 }
 
 int
 AAudioBackend::midi_event_put (void* port_buffer, pframes_t timestamp, const uint8_t* buffer, size_t size)
 {
+	assert (buffer && port_buffer);
+	if (size >= AAudioMidiEvent::max_size) {
+		return -1;
+	}
+	static_cast<AAudioMidiBuffer*> (port_buffer)->push_back (AAudioMidiEvent (timestamp, buffer, size));
 	return 0;
 }
 
 uint32_t
 AAudioBackend::get_midi_event_count (void* port_buffer)
 {
-	return 0;
+	assert (port_buffer);
+	return static_cast<AAudioMidiBuffer*> (port_buffer)->size ();
 }
 
 void
 AAudioBackend::midi_clear (void* port_buffer)
 {
+	assert (port_buffer);
+	static_cast<AAudioMidiBuffer*> (port_buffer)->clear ();
 }
 
 bool
@@ -543,6 +618,9 @@ AAudioBackend::port_factory (std::string const & name, ARDOUR::DataType type, AR
 	switch (type) {
 	case DataType::AUDIO:
 		port = new AAudioAudioPort (*this, name, flags);
+		break;
+	case DataType::MIDI:
+		port = new AAudioMidiPort (*this, name, flags);
 		break;
 	default:
 		PBD::error << _("AAudioBackend: unsupported port type.") << endmsg;
@@ -792,12 +870,13 @@ AAudioBackend::main_process_thread ()
 
 		_processed_samples += nframes;
 
+		/* the device write blocks until there is room: it is not DSP time */
+		_dsp_load_calc.set_stop_timestamp_us (_x_get_monotonic_usec ());
+		_dsp_load = _dsp_load_calc.get_dsp_load_unbound ();
+
 		if (_output_device) {
 			render_output (nframes);
 		}
-
-		_dsp_load_calc.set_stop_timestamp_us (_x_get_monotonic_usec ());
-		_dsp_load = _dsp_load_calc.get_dsp_load_unbound ();
 	}
 
 	_running = false;

@@ -57,6 +57,45 @@ class AAudioAudioPort : public BackendPort
 		Sample _buffer[max_buffer_size];
 }; // class AAudioAudioPort
 
+/* MIDI ports connect parts of the engine (and the transport masters) to
+ * each other; there is no MIDI device on Android yet.
+ */
+class AAudioMidiEvent : public BackendMIDIEvent
+{
+	public:
+		static const size_t max_size = 256;
+
+		AAudioMidiEvent (const pframes_t timestamp, const uint8_t* data, size_t size);
+		AAudioMidiEvent (const AAudioMidiEvent& other);
+
+		size_t         size () const      { return _size; }
+		pframes_t      timestamp () const { return _timestamp; }
+		const uint8_t* data () const      { return _data; }
+
+	private:
+		size_t    _size;
+		pframes_t _timestamp;
+		uint8_t   _data[max_size];
+};
+
+typedef std::vector<AAudioMidiEvent> AAudioMidiBuffer;
+
+class AAudioMidiPort : public BackendPort
+{
+	public:
+		AAudioMidiPort (AAudioBackend& b, const std::string& name, PortFlags flags);
+		~AAudioMidiPort ();
+
+		DataType type () const { return DataType::MIDI; }
+
+		/* an input port collects the events of the ports connected to it */
+		void* get_buffer (pframes_t nframes);
+		const AAudioMidiBuffer* const_buffer () const { return &_buffer; }
+
+	private:
+		AAudioMidiBuffer _buffer;
+}; // class AAudioMidiPort
+
 class AAudioBackend : public AudioBackend, public PortEngineSharedImpl
 {
 	public:
