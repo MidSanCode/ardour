@@ -2,26 +2,28 @@
 * { box-sizing: border-box; }
 html, body { height: 100%; }
 body { background: var(--bg); color: var(--fg); font: 15px/1.45 system-ui, sans-serif; margin: 0; padding: 10px; display: flex; flex-direction: column; gap: 8px; }
-header { display: flex; align-items: center; gap: 10px; }
+header { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+header .badge { flex-basis: 100%; }
 h1 { font-size: 18px; margin: 0; }
 h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .08em; color: var(--dim); margin: 0 0 8px; }
 .session-name { font-weight: 600; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .badge { font-size: 12px; color: var(--dim); }
 .badge.ok { color: var(--accent); }
 .badge.err { color: var(--hot); }
-.bar, .row, form { display: flex; gap: 6px; align-items: center; }
+.bar, .row, form { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; min-width: 0; }
+select { flex: none; }
 .wrap { flex-wrap: wrap; }
 .spacer { flex: 1; }
 input, select, button { background: #2a2e36; color: var(--fg); border: 1px solid #3a3f4a; border-radius: 6px; padding: 7px 10px; font: inherit; }
-input:not([type=range]) { flex: 1; min-width: 6em; }
+input:not([type=range]) { flex: 1; min-width: 5em; width: 5em; }
 button:disabled { opacity: .4; }
 button.rolling { background: #2f4a31; border-color: var(--accent); }
 #clock { font-family: ui-monospace, monospace; font-size: 18px; margin-left: auto; }
 #tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); }
 #tabs button { border: none; border-radius: 6px 6px 0 0; background: transparent; color: var(--dim); }
 #tabs button.active { background: var(--panel); color: var(--fg); }
-main { flex: 1; min-height: 0; display: flex; }
-.view { display: none; flex: 1; flex-direction: column; gap: 8px; min-height: 0; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px; }
+main { flex: 1; min-height: 0; min-width: 0; display: flex; }
+.view { display: none; flex: 1; min-width: 0; overflow: hidden; flex-direction: column; gap: 8px; min-height: 0; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px; }
 .view.active { display: flex; }
 ul { list-style: none; padding: 0; margin: 4px 0; }
 #session-list li { padding: 6px 0; border-bottom: 1px solid var(--line); display: flex; justify-content: space-between; align-items: center; }
