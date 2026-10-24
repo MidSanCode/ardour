@@ -27,7 +27,8 @@
  *   session.save
  *   session.close
  *   transport.play / transport.stop
- *   transport.state                       rolling, position (samples, seconds)
+ *   transport.state                       rolling, record_enabled, recording, position
+ *   transport.record {enabled}            arms or disarms the session for recording
  *   tracks.list                           every track: id, name, channels
  *   tracks.add       {name, channels}     adds an audio track (1 or 2 channels)
  *   tracks.remove    {id}                 removes a track or bus
@@ -41,12 +42,18 @@
  *   timeline                              every track with its regions (samples)
  *   regions.tone     {track, position?, seconds?, frequency?}
  *                                         records a sine tone into a new region
+ *   regions.import   {track, path, position?}
+ *                                         copies a sound file into the session
  *   region.move      {id, position?, track?}
+ *   region.trim      {id, start?, end?}   new edges on the timeline (samples)
+ *   region.fades     {id, fade_in?, fade_out?}
  *   region.split     {id, position}
  *   region.mute      {id, muted}
  *   region.remove    {id}
  *   region.peaks     {id, count}          min/max pairs of the first channel
  *   transport.locate {position}
+ *   edit.undo / edit.redo                 region edits are undoable; timeline and these
+ *                                         replies carry the next undo/redo names
  *
  * All engine work happens on one thread owned by this module, which carries
  * the event loop and the session event pool libardour expects of a "GUI"

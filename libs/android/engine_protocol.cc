@@ -27,6 +27,10 @@
 #include <mutex>
 #include <vector>
 
+#include <cstring>
+
+#include <sndfile.h>
+
 #include <glib.h>
 #include <glib/gstdio.h>
 #include <glibmm/fileutils.h>
@@ -607,6 +611,8 @@ transport_json ()
 	double sr = session->sample_rate ();
 	std::string j = "{\"ok\":true";
 	j += std::string (",\"rolling\":") + (session->transport_rolling () ? "true" : "false");
+	j += std::string (",\"record_enabled\":") + (session->record_status () >= ARDOUR::Enabled ? "true" : "false");
+	j += std::string (",\"recording\":") + (session->actively_recording () ? "true" : "false");
 	j += ",\"position\":" + std::to_string ((long long) pos);
 	j += ",\"seconds\":" + num (sr > 0 ? pos / sr : 0);
 	j += "}";
@@ -941,6 +947,11 @@ region_json (std::shared_ptr<Region> const& r)
 	j += ",\"start\":" + std::to_string ((long long) r->start ().samples ());
 	j += ",\"layer\":" + std::to_string ((long long) r->layer ());
 	j += std::string (",\"muted\":") + (r->muted () ? "true" : "false");
+	std::shared_ptr<AudioRegion> ar = std::dynamic_pointer_cast<AudioRegion> (r);
+	if (ar) {
+		j += ",\"fade_in\":" + std::to_string ((long long) ar->fade_in_length ().samples ());
+		j += ",\"fade_out\":" + std::to_string ((long long) ar->fade_out_length ().samples ());
+	}
 	j += "}";
 	return j;
 }
@@ -967,6 +978,56 @@ find_region (std::string const& id, std::shared_ptr<Playlist>& playlist)
 	return std::shared_ptr<Region> ();
 }
 
+/* One undoable edit of one or more playlists, the way the editor records
+ * them: the playlists' changes, and their regions', become a single entry in
+ * the session's history.
+ */
+class Edit
+{
+public:
+	Edit (std::string const& name, std::shared_ptr<Playlist> a, std::shared_ptr<Playlist> b = std::shared_ptr<Playlist> ())
+	{
+		session->begin_reversible_command (name);
+		add (a);
+		if (b && b != a) {
+			add (b);
+		}
+	}
+
+	~Edit ()
+	{
+		if (!_done) {
+			commit ();
+		}
+	}
+
+	void commit ()
+	{
+		_done = true;
+		for (auto const& pl : _playlists) {
+			pl->rdiff_and_add_command (session);
+		}
+		session->commit_reversible_command ();
+	}
+
+private:
+	void add (std::shared_ptr<Playlist> pl)
+	{
+		pl->clear_changes ();
+		pl->clear_owned_changes ();
+		_playlists.push_back (pl);
+	}
+
+	std::vector<std::shared_ptr<Playlist> > _playlists;
+	bool                                    _done = false;
+};
+
+static std::string
+history_json ()
+{
+	return ",\"undo\":" + q (session->next_undo ()) + ",\"redo\":" + q (session->next_redo ());
+}
+
 static std::string
 m_timeline ()
 {
@@ -981,7 +1042,10 @@ m_timeline ()
 		tracks += first ? "" : ",";
 		first = false;
 		tracks += "{\"id\":" + q (t->id ().to_s ()) + ",\"name\":" + q (t->name ());
-		tracks += ",\"kind\":" + q (strip_kind (t)) + ",\"regions\":[";
+		tracks += ",\"kind\":" + q (strip_kind (t));
+		std::shared_ptr<AutomationControl> rec = t->rec_enable_control ();
+		tracks += std::string (",\"rec\":") + (rec && rec->get_value () > 0.5 ? "true" : "false");
+		tracks += ",\"regions\":[";
 		std::shared_ptr<Playlist> pl = t->playlist ();
 		if (pl) {
 			bool rfirst = true;
@@ -998,69 +1062,19 @@ m_timeline ()
 	j += ",\"sample_rate\":" + std::to_string ((long long) session->sample_rate ());
 	j += ",\"position\":" + std::to_string ((long long) session->transport_sample ());
 	j += ",\"end\":" + std::to_string ((long long) end);
+	j += history_json ();
 	j += ",\"tracks\":[" + tracks + "]}";
 	return j;
 }
 
-/* Writes a sine tone into new session sources and places a region of it on
- * an audio track: a way to put material on the timeline without a file
- * picker or an input to record from.
+/* Turns finished session sources into a whole-file region and places a copy
+ * of it on a track, as one undoable edit.
  */
-static std::string
-m_regions_tone (Params& p)
+static std::shared_ptr<Region>
+place_sources (SourceList& sources, samplecnt_t length, std::shared_ptr<Track> track, samplepos_t position, std::string const& edit_name)
 {
-	std::string e = require_session ();
-	if (!e.empty ()) {
-		return e;
-	}
-	std::shared_ptr<AudioTrack> track = std::dynamic_pointer_cast<AudioTrack> (find_route (p["track"]));
-	if (!track || !track->playlist ()) {
-		return error_reply ("no such audio track");
-	}
-	double const sr      = session->sample_rate ();
-	double const seconds = p["seconds"].empty () ? 2.0 : atof (p["seconds"].c_str ());
-	double const freq    = p["frequency"].empty () ? 440.0 : atof (p["frequency"].c_str ());
-	if (seconds <= 0 || seconds > 600) {
-		return error_reply ("seconds must be between 0 and 600");
-	}
-	if (freq <= 0 || freq >= sr / 2) {
-		return error_reply ("the frequency is out of range");
-	}
-	samplepos_t const position = param_samples (p, "position", session->transport_sample ());
-	samplecnt_t const length   = (samplecnt_t) (seconds * sr);
-	samplecnt_t const fade     = std::min<samplecnt_t> (length / 4, (samplecnt_t) (sr * 0.01));
-	uint32_t const    nchans   = std::max<uint32_t> (1, track->n_inputs ().n_audio ());
-
-	SourceList sources;
-	for (uint32_t c = 0; c < nchans; ++c) {
-		std::shared_ptr<AudioFileSource> src =
-			session->create_audio_source_for_session (nchans, track->name () + "-tone", c);
-		if (!src) {
-			return error_reply ("cannot create an audio file in the session");
-		}
-		sources.push_back (src);
-	}
-
-	const samplecnt_t  block = 4096;
-	std::vector<Sample> buf (block);
 	for (auto const& s : sources) {
 		std::shared_ptr<AudioSource> as = std::dynamic_pointer_cast<AudioSource> (s);
-		for (samplecnt_t done = 0; done < length; done += block) {
-			samplecnt_t n = std::min (block, length - done);
-			for (samplecnt_t i = 0; i < n; ++i) {
-				samplecnt_t k   = done + i;
-				double      amp = 0.5;
-				if (k < fade) {
-					amp *= (double) k / fade;
-				} else if (k > length - fade) {
-					amp *= (double) (length - k) / fade;
-				}
-				buf[i] = (Sample) (amp * sin (2.0 * M_PI * freq * k / sr));
-			}
-			if (as->write (&buf[0], n) != n) {
-				return error_reply ("writing the tone failed");
-			}
-		}
 		std::shared_ptr<AudioFileSource> afs = std::dynamic_pointer_cast<AudioFileSource> (s);
 		afs->flush ();
 		{
@@ -1089,9 +1103,154 @@ m_regions_tone (Params& p)
 	std::shared_ptr<Region> region = RegionFactory::create (whole, plist2);
 
 	std::shared_ptr<Playlist> pl = track->playlist ();
-	pl->clear_changes ();
+	Edit edit (edit_name, pl);
 	pl->add_region (region, timepos_t (position));
+	return region;
+}
+
+static bool
+new_sources (std::shared_ptr<Track> track, uint32_t nchans, std::string const& base, SourceList& sources)
+{
+	for (uint32_t c = 0; c < nchans; ++c) {
+		std::shared_ptr<AudioFileSource> src = session->create_audio_source_for_session (nchans, base, c);
+		if (!src) {
+			return false;
+		}
+		sources.push_back (src);
+	}
+	return true;
+}
+
+/* Writes a sine tone into new session sources and places a region of it on
+ * an audio track: a way to put material on the timeline without a file
+ * or an input to record from.
+ */
+static std::string
+m_regions_tone (Params& p)
+{
+	std::string e = require_session ();
+	if (!e.empty ()) {
+		return e;
+	}
+	std::shared_ptr<AudioTrack> track = std::dynamic_pointer_cast<AudioTrack> (find_route (p["track"]));
+	if (!track || !track->playlist ()) {
+		return error_reply ("no such audio track");
+	}
+	double const sr      = session->sample_rate ();
+	double const seconds = p["seconds"].empty () ? 2.0 : atof (p["seconds"].c_str ());
+	double const freq    = p["frequency"].empty () ? 440.0 : atof (p["frequency"].c_str ());
+	if (seconds <= 0 || seconds > 600) {
+		return error_reply ("seconds must be between 0 and 600");
+	}
+	if (freq <= 0 || freq >= sr / 2) {
+		return error_reply ("the frequency is out of range");
+	}
+	samplepos_t const position = param_samples (p, "position", session->transport_sample ());
+	samplecnt_t const length   = (samplecnt_t) (seconds * sr);
+	samplecnt_t const fade     = std::min<samplecnt_t> (length / 4, (samplecnt_t) (sr * 0.01));
+	uint32_t const    nchans   = std::max<uint32_t> (1, track->n_inputs ().n_audio ());
+
+	SourceList sources;
+	if (!new_sources (track, nchans, track->name () + "-tone", sources)) {
+		return error_reply ("cannot create an audio file in the session");
+	}
+
+	const samplecnt_t  block = 4096;
+	std::vector<Sample> buf (block);
+	for (auto const& s : sources) {
+		std::shared_ptr<AudioSource> as = std::dynamic_pointer_cast<AudioSource> (s);
+		for (samplecnt_t done = 0; done < length; done += block) {
+			samplecnt_t n = std::min (block, length - done);
+			for (samplecnt_t i = 0; i < n; ++i) {
+				samplecnt_t k   = done + i;
+				double      amp = 0.5;
+				if (k < fade) {
+					amp *= (double) k / fade;
+				} else if (k > length - fade) {
+					amp *= (double) (length - k) / fade;
+				}
+				buf[i] = (Sample) (amp * sin (2.0 * M_PI * freq * k / sr));
+			}
+			if (as->write (&buf[0], n) != n) {
+				return error_reply ("writing the tone failed");
+			}
+		}
+	}
+
+	std::shared_ptr<Region> region = place_sources (sources, length, track, position, "insert tone");
 	return "{\"ok\":true,\"region\":" + region_json (region) + "}";
+}
+
+/* Copies a sound file (anything libsndfile reads) into the session and puts
+ * it on an audio track.  Files at another sample rate are placed as they
+ * are; there is no resampling yet.
+ */
+static std::string
+m_regions_import (Params& p)
+{
+	std::string e = require_session ();
+	if (!e.empty ()) {
+		return e;
+	}
+	std::shared_ptr<AudioTrack> track = std::dynamic_pointer_cast<AudioTrack> (find_route (p["track"]));
+	if (!track || !track->playlist ()) {
+		return error_reply ("no such audio track");
+	}
+	std::string path = p["path"];
+	SF_INFO     info;
+	memset (&info, 0, sizeof (info));
+	SNDFILE* sf = path.empty () ? 0 : sf_open (path.c_str (), SFM_READ, &info);
+	if (!sf) {
+		return error_reply ("cannot read the sound file: " + std::string (sf_strerror (0)));
+	}
+	if (info.channels < 1 || info.frames < 1) {
+		sf_close (sf);
+		return error_reply ("the sound file is empty");
+	}
+
+	std::string base = Glib::path_get_basename (path);
+	std::string::size_type dot = base.rfind ('.');
+	if (dot != std::string::npos && dot > 0) {
+		base = base.substr (0, dot);
+	}
+
+	/* one session source per file channel */
+	uint32_t const nchans = std::min (info.channels, 64);
+	SourceList     sources;
+	if (!new_sources (track, nchans, base, sources)) {
+		sf_close (sf);
+		return error_reply ("cannot create an audio file in the session");
+	}
+
+	const sf_count_t   block = 4096;
+	std::vector<float> interleaved (block * info.channels);
+	std::vector<Sample> chan (block);
+	sf_count_t total = 0;
+	while (true) {
+		sf_count_t n = sf_readf_float (sf, &interleaved[0], block);
+		if (n <= 0) {
+			break;
+		}
+		for (uint32_t c = 0; c < nchans; ++c) {
+			for (sf_count_t i = 0; i < n; ++i) {
+				chan[i] = interleaved[i * info.channels + c];
+			}
+			std::dynamic_pointer_cast<AudioSource> (sources[c])->write (&chan[0], n);
+		}
+		total += n;
+	}
+	sf_close (sf);
+	if (total == 0) {
+		return error_reply ("no audio could be read from the file");
+	}
+
+	samplepos_t position = param_samples (p, "position", session->transport_sample ());
+	std::shared_ptr<Region> region = place_sources (sources, total, track, position, "import audio");
+	std::string j = "{\"ok\":true,\"region\":" + region_json (region);
+	if (info.samplerate != (int) session->sample_rate ()) {
+		j += ",\"warning\":" + q ("the file's sample rate (" + std::to_string (info.samplerate) + " Hz) differs from the session's; it was not resampled");
+	}
+	return j + "}";
 }
 
 static std::string
@@ -1116,15 +1275,15 @@ m_region_move (Params& p)
 		}
 		if (to->playlist () != pl) {
 			samplepos_t pos = param_samples (p, "position", r->position ().samples ());
-			pl->clear_changes ();
+			Edit edit ("move region", pl, to->playlist ());
 			pl->remove_region (r);
-			to->playlist ()->clear_changes ();
 			to->playlist ()->add_region (r, timepos_t (pos));
+			edit.commit ();
 			return "{\"ok\":true,\"region\":" + region_json (r) + "}";
 		}
 	}
 	if (p.count ("position")) {
-		r->clear_changes ();
+		Edit edit ("move region", pl);
 		r->set_position (timepos_t (param_samples (p, "position", 0)));
 	}
 	return "{\"ok\":true,\"region\":" + region_json (r) + "}";
@@ -1147,7 +1306,7 @@ m_region_split (Params& p)
 	if (at <= start || at >= start + r->length ().samples ()) {
 		return error_reply ("the split point is outside the region");
 	}
-	pl->clear_changes ();
+	Edit edit ("split region", pl);
 	pl->split_region (r, timepos_t (at));
 	return "{\"ok\":true}";
 }
@@ -1164,7 +1323,7 @@ m_region_remove (Params& p)
 	if (!r) {
 		return error_reply ("no such region");
 	}
-	pl->clear_changes ();
+	Edit edit ("remove region", pl);
 	pl->remove_region (r);
 	return "{\"ok\":true}";
 }
@@ -1181,8 +1340,114 @@ m_region_mute (Params& p)
 	if (!r) {
 		return error_reply ("no such region");
 	}
-	r->set_muted (truthy (p["muted"]));
+	{
+		Edit edit (truthy (p["muted"]) ? "mute region" : "unmute region", pl);
+		r->set_muted (truthy (p["muted"]));
+	}
 	return "{\"ok\":true,\"region\":" + region_json (r) + "}";
+}
+
+/* moves a region's start and/or end on the timeline, keeping its audio where
+ * it is (a trim, not a move)
+ */
+static std::string
+m_region_trim (Params& p)
+{
+	std::string e = require_session ();
+	if (!e.empty ()) {
+		return e;
+	}
+	std::shared_ptr<Playlist> pl;
+	std::shared_ptr<Region>   r = find_region (p["id"], pl);
+	if (!r) {
+		return error_reply ("no such region");
+	}
+	samplepos_t const pos = r->position ().samples ();
+	samplepos_t const end = pos + r->length ().samples ();
+	samplepos_t const new_start = param_samples (p, "start", pos);
+	samplepos_t const new_end   = param_samples (p, "end", end);
+	if (new_end <= new_start + 64) {
+		return error_reply ("the region would be too short");
+	}
+	{
+		Edit edit ("trim region", pl);
+		if (new_start != pos) {
+			r->trim_front (timepos_t (new_start));
+		}
+		if (new_end != end) {
+			r->trim_end (timepos_t (new_end - 1));
+		}
+	}
+	return "{\"ok\":true,\"region\":" + region_json (r) + "}";
+}
+
+static std::string
+m_region_fades (Params& p)
+{
+	std::string e = require_session ();
+	if (!e.empty ()) {
+		return e;
+	}
+	std::shared_ptr<Playlist> pl;
+	std::shared_ptr<AudioRegion> r = std::dynamic_pointer_cast<AudioRegion> (find_region (p["id"], pl));
+	if (!r) {
+		return error_reply ("no such audio region");
+	}
+	samplecnt_t const len = r->length ().samples ();
+	{
+		Edit edit ("change fades", pl);
+		if (p.count ("fade_in")) {
+			r->set_fade_in_active (true);
+			r->set_fade_in_length (std::max<samplecnt_t> (64, std::min (len / 2, param_samples (p, "fade_in", 64))));
+		}
+		if (p.count ("fade_out")) {
+			r->set_fade_out_active (true);
+			r->set_fade_out_length (std::max<samplecnt_t> (64, std::min (len / 2, param_samples (p, "fade_out", 64))));
+		}
+	}
+	return "{\"ok\":true,\"region\":" + region_json (r) + "}";
+}
+
+static std::string
+m_history (bool undo)
+{
+	std::string e = require_session ();
+	if (!e.empty ()) {
+		return e;
+	}
+	if (undo) {
+		if (session->undo_depth () == 0) {
+			return error_reply ("nothing to undo");
+		}
+		session->undo (1);
+	} else {
+		if (session->redo_depth () == 0) {
+			return error_reply ("nothing to redo");
+		}
+		session->redo (1);
+	}
+	return "{\"ok\":true" + history_json () + "}";
+}
+
+/* arms the session for recording (armed tracks record once it rolls), or
+ * disarms it
+ */
+static std::string
+m_transport_record (Params& p)
+{
+	std::string e = require_session ();
+	if (!e.empty ()) {
+		return e;
+	}
+	if (truthy (p["enabled"])) {
+		session->maybe_enable_record ();
+	} else {
+		session->disable_record (false);
+	}
+	for (int i = 0; i < 200 && (session->record_status () >= ARDOUR::Enabled) != truthy (p["enabled"]); ++i) {
+		g_usleep (5000);
+	}
+	return transport_json ();
 }
 
 /* the waveform of a region's first channel as count min/max pairs */
@@ -1264,6 +1529,12 @@ dispatch (std::string const& method, Params& p)
 	if (method == "region.split")    return m_region_split (p);
 	if (method == "region.remove")   return m_region_remove (p);
 	if (method == "region.mute")     return m_region_mute (p);
+	if (method == "region.trim")     return m_region_trim (p);
+	if (method == "region.fades")    return m_region_fades (p);
+	if (method == "regions.import")  return m_regions_import (p);
+	if (method == "edit.undo")       return m_history (true);
+	if (method == "edit.redo")       return m_history (false);
+	if (method == "transport.record") return m_transport_record (p);
 	if (method == "region.peaks")    return m_region_peaks (p);
 	if (method == "transport.locate") return m_transport_locate (p);
 	return error_reply ("unknown method '" + method + "'");
