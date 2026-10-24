@@ -1254,7 +1254,7 @@ jobs:
           disable-animations: true
           emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim
           script: |
-            adb install -r app-debug.apk
+            adb install -r -g app-debug.apk
             adb logcat -c
             adb shell am start -n org.ardour.ardour/.MainActivity --ez smoketest true
             for i in $(seq 1 90); do sleep 2; if adb logcat -d -s ArdourSmoke:I | grep -q 'ARDOUR_SMOKE'; then break; fi; done
