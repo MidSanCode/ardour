@@ -2,6 +2,10 @@ package org.ardour.ardour
 
 import android.util.Log
 import org.json.JSONObject
+import java.io.File
+import java.io.FileOutputStream
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 
 /**
  * The check CI runs on an emulator (am start ... --ez smoketest true): it
@@ -12,12 +16,12 @@ object SmokeTest {
 
     private const val TAG = "ArdourSmoke"
 
-    fun run(host: EngineHost, done: (Boolean) -> Unit = {}) {
+    fun run(host: EngineHost, scratch: File, done: (Boolean) -> Unit = {}) {
         Thread {
             var passed = false
             val result = try {
                 check(host)
-                checkEditing(host)
+                checkEditing(host, scratch)
                 passed = true
                 "ARDOUR_SMOKE PASS"
             } catch (t: Throwable) {
@@ -47,7 +51,77 @@ object SmokeTest {
      * meter reading while the tone plays.  The session is left loaded so the
      * frontend has something to show.
      */
-    private fun checkEditing(host: EngineHost) {
+    /** a mono 16-bit WAV file of a sine tone */
+    private fun writeWav(file: File, rate: Int, seconds: Double, frequency: Double) {
+        val frames = (rate * seconds).toInt()
+        val data = ByteBuffer.allocate(44 + frames * 2).order(ByteOrder.LITTLE_ENDIAN)
+        data.put("RIFF".toByteArray()).putInt(36 + frames * 2).put("WAVE".toByteArray())
+        data.put("fmt ".toByteArray()).putInt(16).putShort(1).putShort(1).putInt(rate).putInt(rate * 2).putShort(2).putShort(16)
+        data.put("data".toByteArray()).putInt(frames * 2)
+        for (i in 0 until frames) {
+            data.putShort((Math.sin(2 * Math.PI * frequency * i / rate) * 0.4 * 32767).toInt().toShort())
+        }
+        FileOutputStream(file).use { it.write(data.array()) }
+    }
+
+    private fun regionById(host: EngineHost, trackId: String, id: String): JSONObject {
+        val regions = trackRegions(host, trackId)
+        for (i in 0 until regions.length()) if (regions.getJSONObject(i).getString("id") == id) return regions.getJSONObject(i)
+        fail("region $id is not on track $trackId")
+    }
+
+    /** importing a file, trimming, fades, undo and redo, and recording */
+    private fun checkImportAndHistory(host: EngineHost, scratch: File, rate: Long, vocals: String) {
+        val wav = File(scratch, "smoke-import.wav")
+        writeWav(wav, rate.toInt(), 1.0, 220.0)
+        val imported = call(host, "regions.import",
+            JSONObject().put("track", vocals).put("path", wav.absolutePath).put("position", 5 * rate)).getJSONObject("region")
+        val id = imported.getString("id")
+        if (imported.getLong("length") != rate) fail("the imported region has the wrong length: $imported")
+
+        val trimmed = call(host, "region.trim",
+            JSONObject().put("id", id).put("start", 5 * rate + rate / 4).put("end", 5 * rate + 3 * rate / 4)).getJSONObject("region")
+        if (trimmed.getLong("position") != 5 * rate + rate / 4) fail("the front trim did not apply: $trimmed")
+        if (!near(trimmed.getLong("length").toDouble(), rate / 2.0, 2.0)) fail("the end trim did not apply: $trimmed")
+        if (trimmed.getLong("start") != rate / 4) fail("the front trim did not keep the audio in place: $trimmed")
+
+        val faded = call(host, "region.fades", JSONObject().put("id", id).put("fade_in", 2400).put("fade_out", 4800))
+            .getJSONObject("region")
+        if (faded.getLong("fade_in") != 2400L || faded.getLong("fade_out") != 4800L) fail("the fades did not apply: $faded")
+
+        val undone = call(host, "edit.undo")
+        if (undone.optString("redo") != "change fades") fail("undo did not undo the fades: $undone")
+        if (regionById(host, vocals, id).getLong("fade_in") == 2400L) fail("the fade is still there after undo")
+        call(host, "edit.undo")
+        if (regionById(host, vocals, id).getLong("length") != rate) fail("undo did not restore the trimmed region")
+        call(host, "edit.redo")
+        call(host, "edit.redo")
+        val again = regionById(host, vocals, id)
+        if (again.getLong("fade_in") != 2400L || again.getLong("position") != 5 * rate + rate / 4) fail("redo did not restore the edits: $again")
+
+        /* recording: the emulator's input may be silent or missing, so this
+         * only requires the protocol to work and reports what was captured */
+        val before = trackRegions(host, vocals).length()
+        call(host, "strip.set", JSONObject().put("id", vocals).put("rec", true))
+        call(host, "transport.locate", JSONObject().put("position", 8 * rate))
+        Thread.sleep(200)
+        val armed = call(host, "transport.record", JSONObject().put("enabled", true))
+        if (!armed.optBoolean("record_enabled")) fail("the session did not arm for recording: $armed")
+        call(host, "transport.play")
+        var recording = false
+        for (i in 0 until 20) {
+            Thread.sleep(100)
+            if (call(host, "transport.state").optBoolean("recording")) recording = true
+        }
+        call(host, "transport.stop")
+        Thread.sleep(1000)
+        call(host, "transport.record", JSONObject().put("enabled", false))
+        call(host, "strip.set", JSONObject().put("id", vocals).put("rec", false))
+        val after = trackRegions(host, vocals).length()
+        Log.i(TAG, "recording: rolled while recording=$recording, regions on the track $before -> $after")
+    }
+
+    private fun checkEditing(host: EngineHost, scratch: File) {
         val rate = call(host, "engine.status").optLong("sample_rate", 48000L)
 
         call(host, "session.create", JSONObject().put("name", "ui-" + System.currentTimeMillis()))
@@ -98,6 +172,8 @@ object SmokeTest {
         call(host, "region.move", JSONObject().put("id", right).put("track", guitar).put("position", 6 * rate))
         if (trackRegions(host, vocals).length() != 0) fail("the region did not leave its track")
         if (trackRegions(host, guitar).length() != 2) fail("the region did not arrive on the other track")
+
+        checkImportAndHistory(host, scratch, rate, vocals)
 
         /* material for the frontend, and a signal for the meters */
         call(host, "regions.tone", JSONObject().put("track", vocals).put("position", 0).put("seconds", 4).put("frequency", 330))
