@@ -9,6 +9,9 @@
  *   iOS      window.webkit.messageHandlers.ardour.postMessage({id, method, params}),
  *            answered by the host with window.ArdourBridge.reply(id, json)
  *   browser  window.ArdourWasm.call(method, params) -> Promise (the wasm engine)
+ *
+ * ArdourBridge.pickFile() -> Promise of a path (or null) asks the host for a
+ * sound file; Android answers with window.ArdourBridge.picked(id, path).
  */
 (function () {
   'use strict';
@@ -54,5 +57,31 @@
     }
   }
 
-  window.ArdourBridge = { call: call, reply: reply, host: host };
+  /* Lets the user choose a sound file; resolves to a path the engine can
+   * open, or null.  Only the Android host can do this so far. */
+  var picks = {};
+  function pickFile() {
+    if (host() === 'android' && typeof window.ArdourNative.pickAudioFile === 'function') {
+      return new Promise(function (resolve) {
+        var id = nextId++;
+        picks[id] = resolve;
+        window.ArdourNative.pickAudioFile(id);
+      });
+    }
+    return Promise.resolve(null);
+  }
+
+  function picked(id, path) {
+    var resolve = picks[id];
+    if (resolve) {
+      delete picks[id];
+      resolve(path || null);
+    }
+  }
+
+  function canPickFiles() {
+    return host() === 'android' && typeof window.ArdourNative.pickAudioFile === 'function';
+  }
+
+  window.ArdourBridge = { call: call, reply: reply, host: host, pickFile: pickFile, picked: picked, canPickFiles: canPickFiles };
 })();

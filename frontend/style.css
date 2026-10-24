@@ -77,3 +77,20 @@ ul { list-style: none; padding: 0; margin: 4px 0; }
 .toggle.solo.on { background: #5aa05e; color: #111; }
 .toggle.rec.on { background: #d84343; color: #fff; }
 .remove { position: absolute; top: 2px; right: 2px; padding: 0 5px; font-size: 11px; border: none; background: transparent; color: var(--dim); }
+
+/* recording, trimming, fades */
+#record.armed { background: #5a2626; border-color: #d84343; color: #ff9a9a; }
+#record.recording { background: #d84343; color: #fff; }
+.track-head .head-row { display: flex; align-items: center; gap: 4px; }
+.track-head .head-row .track-title { flex: 1; }
+.track-head .rec-arm { padding: 0 6px; font-size: 11px; font-weight: 700; line-height: 18px; }
+.track-head .rec-arm.on { background: #d84343; color: #fff; }
+.region .fades { position: absolute; left: 0; top: 0; width: 100%; height: 100%; pointer-events: none; }
+.region .handle { position: absolute; display: none; touch-action: none; z-index: 2; }
+.region.selected .handle { display: block; }
+.region .trim { top: 0; bottom: 0; width: 14px; cursor: ew-resize; background: rgba(255,255,255,.18); }
+.region .trim.l { left: 0; border-left: 3px solid #fff; }
+.region .trim.r { right: 0; border-right: 3px solid #fff; }
+.region .fade-h { top: 0; width: 14px; height: 14px; background: #e0c050; border-radius: 2px; cursor: ew-resize; }
+.region.dragging .handle { display: none; }
+.strip.master { position: sticky; right: 0; z-index: 1; box-shadow: -6px 0 8px rgba(0,0,0,.4); }

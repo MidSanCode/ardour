@@ -96,7 +96,7 @@
     }
     $('current').textContent = state.session ? state.session.name : 'no session';
     var haveSession = !!state.session;
-    ['save', 'close', 'play', 'stop', 'home'].forEach(function (id) { $(id).disabled = !haveSession; });
+    ['save', 'close', 'play', 'stop', 'home', 'record'].forEach(function (id) { $(id).disabled = !haveSession; });
     document.querySelectorAll('#tabs button[data-view="editor"], #tabs button[data-view="mixer"]').forEach(function (b) {
       b.disabled = !haveSession;
     });
@@ -192,6 +192,9 @@
     call('transport.stop').then(checked).then(function () { setTimeout(refreshTimeline, 300); }).catch(ignore);
   };
   $('home').onclick = function () { locate(0); };
+  $('record').onclick = function () {
+    call('transport.record', { enabled: !state.recordEnabled }).then(checked).then(updateTransport).catch(ignore);
+  };
 
   function locate(samples) {
     return call('transport.locate', { position: samples }).then(checked).then(function (t) {
@@ -200,6 +203,11 @@
   }
 
   function updateTransport(t) {
+    var wasRolling = state.rolling;
+    if (wasRolling && !t.rolling) setTimeout(refreshTimeline, 500); /* a take may have landed */
+    state.recordEnabled = !!t.record_enabled;
+    $('record').classList.toggle('armed', !!t.record_enabled && !t.recording);
+    $('record').classList.toggle('recording', !!t.recording);
     state.rolling = t.rolling;
     state.position = t.position;
     $('clock').textContent = formatClock(t.seconds);
@@ -223,12 +231,23 @@
       if (!r.ok) return;
       state.timeline = r;
       state.sampleRate = r.sample_rate || state.sampleRate;
+      updateHistory(r);
       var ids = r.tracks.map(function (t) { return t.id; });
       if (ids.indexOf(state.selectedTrack) < 0) state.selectedTrack = ids.length ? ids[0] : null;
       if (state.selectedRegion && !findRegion(state.selectedRegion)) state.selectedRegion = null;
       renderTimeline();
     });
   }
+
+  function updateHistory(r) {
+    $('undo').disabled = !r.undo;
+    $('undo').title = r.undo ? 'Undo ' + r.undo : 'Nothing to undo';
+    $('redo').disabled = !r.redo;
+    $('redo').title = r.redo ? 'Redo ' + r.redo : 'Nothing to redo';
+  }
+
+  $('undo').onclick = function () { call('edit.undo').then(checked).then(refreshTimeline).catch(ignore); };
+  $('redo').onclick = function () { call('edit.redo').then(checked).then(refreshTimeline).catch(ignore); };
 
   function findRegion(id) {
     if (!state.timeline) return null;
@@ -275,7 +294,16 @@
     heads.appendChild(el('div', 'head-spacer'));
     tl.tracks.forEach(function (t) {
       var head = el('div', 'track-head' + (t.id === state.selectedTrack ? ' selected' : ''));
-      head.appendChild(el('span', 'track-title', t.name));
+      var row = el('div', 'head-row');
+      row.appendChild(el('span', 'track-title', t.name));
+      var arm = el('button', 'rec-arm' + (t.rec ? ' on' : ''), 'R');
+      arm.title = 'Arm for recording';
+      arm.onclick = function (e) {
+        e.stopPropagation();
+        call('strip.set', { id: t.id, rec: !t.rec }).then(checked).then(refreshAll).catch(ignore);
+      };
+      row.appendChild(arm);
+      head.appendChild(row);
       var meter = el('div', 'meter h');
       meter.dataset.meter = t.id;
       meter.appendChild(el('div'));
@@ -310,8 +338,104 @@
     div.appendChild(canvas);
     div.appendChild(el('span', 'region-name', r.name));
     drawPeaks(canvas, r);
+    if (r.fade_in !== undefined) {
+      var svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+      svg.setAttribute('class', 'fades');
+      div.appendChild(svg);
+      drawFades(svg, width, r.fade_in, r.fade_out);
+    }
     attachDrag(div, track, r);
+    attachHandles(div, r, width);
     return div;
+  }
+
+  function drawFades(svg, width, fadeIn, fadeOut) {
+    var h = LANE_HEIGHT - 8;
+    var fi = Math.min(width, samplesToPx(fadeIn)), fo = Math.min(width, samplesToPx(fadeOut));
+    svg.setAttribute('viewBox', '0 0 ' + width + ' ' + h);
+    svg.setAttribute('preserveAspectRatio', 'none');
+    svg.innerHTML =
+      '<polygon points="0,0 ' + fi + ',0 0,' + h + '" fill="rgba(0,0,0,.45)"/>' +
+      '<line x1="0" y1="' + h + '" x2="' + fi + '" y2="0" stroke="#e0c050" stroke-width="1.5"/>' +
+      '<polygon points="' + width + ',0 ' + (width - fo) + ',0 ' + width + ',' + h + '" fill="rgba(0,0,0,.45)"/>' +
+      '<line x1="' + (width - fo) + '" y1="0" x2="' + width + '" y2="' + h + '" stroke="#e0c050" stroke-width="1.5"/>';
+  }
+
+  /* a handle on a selected region: move(dx) while dragging, done(dx) after */
+  function dragHandle(handle, move, done) {
+    var startX = null;
+    handle.addEventListener('pointerdown', function (e) {
+      e.stopPropagation();
+      startX = e.clientX;
+      handle.setPointerCapture(e.pointerId);
+    });
+    handle.addEventListener('pointermove', function (e) {
+      if (startX !== null) move(e.clientX - startX);
+    });
+    handle.addEventListener('pointerup', function (e) {
+      if (startX === null) return;
+      var dx = e.clientX - startX;
+      startX = null;
+      if (Math.abs(dx) >= 2) done(dx); else move(0);
+    });
+    handle.addEventListener('pointercancel', function () { startX = null; move(0); });
+    handle.addEventListener('click', function (e) { e.stopPropagation(); });
+  }
+
+  function signedSamples(dx) { return pxToSamples(Math.abs(dx)) * (dx < 0 ? -1 : 1); }
+
+  function attachHandles(div, r, width) {
+    var left = samplesToPx(r.position);
+    var minLen = Math.round(state.sampleRate * 0.01);
+    var edit = function (method, params) {
+      params.id = r.id;
+      call(method, params).then(checked).then(refreshTimeline).catch(refreshTimeline);
+    };
+
+    var trimL = el('div', 'handle trim l');
+    dragHandle(trimL, function (dx) {
+      var d = Math.max(-samplesToPx(r.start), Math.min(dx, width - 8));
+      div.style.left = (left + d) + 'px';
+      div.style.width = (width - d) + 'px';
+    }, function (dx) {
+      var start = r.position + signedSamples(dx);
+      start = Math.max(r.position - r.start, Math.min(start, r.position + r.length - minLen));
+      edit('region.trim', { start: Math.max(0, start) });
+    });
+    div.appendChild(trimL);
+
+    var trimR = el('div', 'handle trim r');
+    dragHandle(trimR, function (dx) {
+      div.style.width = Math.max(8, width + dx) + 'px';
+    }, function (dx) {
+      var end = r.position + r.length + signedSamples(dx);
+      edit('region.trim', { end: Math.max(r.position + minLen, end) });
+    });
+    div.appendChild(trimR);
+
+    if (r.fade_in === undefined) return;
+    var svg = div.querySelector('svg.fades');
+    var fadeIn = el('div', 'handle fade-h');
+    fadeIn.style.left = Math.max(0, samplesToPx(r.fade_in) - 7) + 'px';
+    dragHandle(fadeIn, function (dx) {
+      var fi = Math.max(0, r.fade_in + signedSamples(dx));
+      fadeIn.style.left = Math.max(0, samplesToPx(fi) - 7) + 'px';
+      drawFades(svg, width, fi, r.fade_out);
+    }, function (dx) {
+      edit('region.fades', { fade_in: Math.max(64, r.fade_in + signedSamples(dx)) });
+    });
+    div.appendChild(fadeIn);
+
+    var fadeOut = el('div', 'handle fade-h');
+    fadeOut.style.right = Math.max(0, samplesToPx(r.fade_out) - 7) + 'px';
+    dragHandle(fadeOut, function (dx) {
+      var fo = Math.max(0, r.fade_out - signedSamples(dx));
+      fadeOut.style.right = Math.max(0, samplesToPx(fo) - 7) + 'px';
+      drawFades(svg, width, r.fade_in, fo);
+    }, function (dx) {
+      edit('region.fades', { fade_out: Math.max(64, r.fade_out - signedSamples(dx)) });
+    });
+    div.appendChild(fadeOut);
   }
 
   function drawPeaks(canvas, r) {
@@ -404,6 +528,8 @@
     $('mute-region').textContent = found && found.region.muted ? 'Unmute' : 'Mute';
     var track = state.timeline && state.timeline.tracks.filter(function (t) { return t.id === state.selectedTrack; })[0];
     $('tone').disabled = !track || track.kind !== 'audio';
+    $('import').disabled = !track || track.kind !== 'audio';
+    $('import').style.display = window.ArdourBridge.canPickFiles() ? '' : 'none';
   }
 
   $('add-track').onsubmit = function (e) {
@@ -419,6 +545,20 @@
     if (!state.selectedTrack) return;
     call('regions.tone', { track: state.selectedTrack, position: state.position, seconds: 2, frequency: 440 })
       .then(checked).then(function (r) { state.selectedRegion = r.region.id; return refreshTimeline(); }).catch(ignore);
+  };
+
+  $('import').onclick = function () {
+    var track = state.selectedTrack, at = state.position;
+    if (!track) return;
+    window.ArdourBridge.pickFile().then(function (path) {
+      if (!path) return;
+      message('importing…');
+      return call('regions.import', { track: track, path: path, position: at }).then(checked).then(function (r) {
+        state.selectedRegion = r.region.id;
+        if (r.warning) message(r.warning);
+        return refreshTimeline();
+      });
+    }).catch(ignore);
   };
 
   $('split').onclick = function () {
@@ -646,12 +786,21 @@
   window.ArdourApp = {
     show: function (name) { if (state.session || name === 'session') showView(name); },
     refresh: function () { return refreshAll(); },
+    selectLastRegion: function () {
+      var all = document.querySelectorAll('.region');
+      if (!all.length) return;
+      var d = all[all.length - 1];
+      var lane = d.closest('.lane');
+      selectRegion(d.dataset.region, lane ? lane.dataset.track : null);
+    },
     describe: function () {
       return 'view=' + state.view +
         ' session=' + (state.session ? state.session.name : '-') +
         ' lanes=' + document.querySelectorAll('.lane').length +
         ' regions=' + document.querySelectorAll('.region').length +
-        ' strips=' + document.querySelectorAll('.strip').length;
+        ' strips=' + document.querySelectorAll('.strip').length +
+        ' selected=' + (state.selectedRegion ? 1 : 0) +
+        ' undo=' + ($('undo').disabled ? 0 : 1);
     }
   };
 

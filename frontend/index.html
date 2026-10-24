@@ -17,6 +17,7 @@
   <button id="home" disabled title="Go to start">&#9198;</button>
   <button id="play" disabled>&#9654;</button>
   <button id="stop" disabled>&#9632;</button>
+  <button id="record" disabled title="Arm the session for recording">&#9679;</button>
   <span id="clock">00:00:00.000</span>
 </div>
 
@@ -52,6 +53,9 @@
     </form>
   </div>
   <div class="bar wrap" id="region-tools">
+    <button id="undo" disabled title="Undo">&#8630;</button>
+    <button id="redo" disabled title="Redo">&#8631;</button>
+    <button id="import" title="Import a sound file onto the selected track at the playhead">Import</button>
     <button id="tone" title="Insert a test tone on the selected track at the playhead">+ Tone</button>
     <button id="split" disabled>Split</button>
     <button id="mute-region" disabled>Mute</button>
@@ -70,7 +74,7 @@
       </div>
     </div>
   </div>
-  <p class="hint">Tap a lane to move the playhead, tap a region to select it, drag it to move it (onto another track too).</p>
+  <p class="hint">Tap a lane to move the playhead, tap a region to select it, drag it to move it (onto another track too). On a selected region, drag its side edges to trim and its top corners to set fades.</p>
 </section>
 
 <section id="view-mixer" class="view">
