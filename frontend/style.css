@@ -105,8 +105,8 @@ ul { list-style: none; padding: 0; margin: 4px 0; }
 .panel { box-sizing: border-box; min-width: 0; min-height: 0; max-height: 100%; background: #1c1c20; border: 1px solid #444; border-radius: 6px; display: flex; flex-direction: column; width: 100%; max-width: 900px; overflow: hidden; }
 .panel-head { display: flex; flex: none; align-items: center; gap: 6px; padding: 6px 8px; border-bottom: 1px solid #333; flex-wrap: wrap; }
 .panel-head strong { font-size: 14px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1 1 120px; }
-#overlay-tools { display: flex; gap: 4px; flex-wrap: wrap; }
-#overlay-body { flex: 1; min-height: 0; overflow: auto; position: relative; }
+#overlay-tools { display: flex; gap: 4px; flex-wrap: wrap; min-width: 0; max-width: 100%; }
+#overlay-body { flex: 1; min-height: 0; max-height: calc(100vh - 140px); overflow: auto; position: relative; }
 
 .roll { display: flex; position: relative; }
 .roll-keys { position: sticky; left: 0; z-index: 2; background: #222; flex: none; width: 38px; }
