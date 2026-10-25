@@ -94,3 +94,40 @@ ul { list-style: none; padding: 0; margin: 4px 0; }
 .region .fade-h { top: 0; width: 14px; height: 14px; background: #e0c050; border-radius: 2px; cursor: ew-resize; }
 .region.dragging .handle { display: none; }
 .strip.master { position: sticky; right: 0; z-index: 1; box-shadow: -6px 0 8px rgba(0,0,0,.4); }
+
+/* MIDI regions */
+.region.midi { background: #2f4a3a; border-color: #5fae7d; }
+.region.midi.selected { border-color: #fff; }
+
+/* overlay panels: the piano roll, plugins */
+.overlay { position: fixed; inset: 0; background: rgba(0,0,0,.6); z-index: 20; display: flex; align-items: stretch; justify-content: center; padding: 8px; }
+.overlay[hidden] { display: none; }
+.panel { background: #1c1c20; border: 1px solid #444; border-radius: 6px; display: flex; flex-direction: column; width: 100%; max-width: 900px; overflow: hidden; }
+.panel-head { display: flex; align-items: center; gap: 6px; padding: 6px 8px; border-bottom: 1px solid #333; flex-wrap: wrap; }
+.panel-head strong { font-size: 14px; }
+#overlay-tools { display: flex; gap: 4px; flex-wrap: wrap; }
+#overlay-body { flex: 1; overflow: auto; position: relative; }
+
+.roll { display: flex; position: relative; }
+.roll-keys { position: sticky; left: 0; z-index: 2; background: #222; flex: none; width: 38px; }
+.roll-key { height: 14px; font-size: 9px; line-height: 14px; padding-left: 3px; border-bottom: 1px solid #2c2c2c; color: #999; box-sizing: border-box; }
+.roll-key.black { background: #111; color: #666; }
+.roll-grid { position: relative; flex: none; touch-action: none; }
+.roll-row { height: 14px; border-bottom: 1px solid #262626; box-sizing: border-box; }
+.roll-row.black { background: #19191c; }
+.roll-beat { position: absolute; top: 0; bottom: 0; width: 1px; background: #333; }
+.roll-beat.bar { background: #555; }
+.roll-note { position: absolute; height: 12px; margin-top: 1px; background: #5fae7d; border: 1px solid #9fe0b6; border-radius: 2px; box-sizing: border-box; touch-action: none; }
+.roll-note.selected { background: #e0c050; border-color: #fff3b0; }
+
+/* plugins on strips */
+.strip-plugins { display: flex; flex-direction: column; gap: 2px; width: 100%; margin: 4px 0; }
+.strip-plugins button { font-size: 10px; padding: 2px 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: left; }
+.strip-plugins button.bypassed { opacity: .5; text-decoration: line-through; }
+.strip-plugins button.instrument { border-color: #5fae7d; }
+.plugin-params { padding: 8px; display: grid; grid-template-columns: minmax(90px, 1fr) 2fr minmax(60px, auto); gap: 6px 10px; align-items: center; }
+.plugin-params label { font-size: 12px; color: #ccc; }
+.plugin-params .val { font-size: 11px; color: #aaa; text-align: right; font-variant-numeric: tabular-nums; }
+.plugin-list { list-style: none; margin: 0; padding: 4px; }
+.plugin-list li { display: flex; justify-content: space-between; align-items: center; padding: 6px; border-bottom: 1px solid #2a2a2a; gap: 8px; }
+.plugin-list li small { color: #888; }

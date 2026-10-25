@@ -25,7 +25,9 @@
     selectedTrack: null,
     selectedRegion: null,
     pxPerSec: 40,
-    peaks: {}
+    peaks: {},
+    notes: {},        /* region id -> notes, for drawing MIDI regions */
+    overlay: null     /* what the overlay shows: {kind: 'roll'|'plugin'|'plugins', ...} */
   };
 
   /* ------------------------------------------------------------------ util */
@@ -246,8 +248,13 @@
     $('redo').title = r.redo ? 'Redo ' + r.redo : 'Nothing to redo';
   }
 
-  $('undo').onclick = function () { call('edit.undo').then(checked).then(refreshTimeline).catch(ignore); };
-  $('redo').onclick = function () { call('edit.redo').then(checked).then(refreshTimeline).catch(ignore); };
+  function afterHistory() {
+    state.notes = {};
+    if (state.overlay && state.overlay.kind === 'roll') loadRoll();
+    return refreshTimeline();
+  }
+  $('undo').onclick = function () { call('edit.undo').then(checked).then(afterHistory).catch(ignore); };
+  $('redo').onclick = function () { call('edit.redo').then(checked).then(afterHistory).catch(ignore); };
 
   function findRegion(id) {
     if (!state.timeline) return null;
@@ -326,7 +333,7 @@
   }
 
   function regionElement(track, r) {
-    var div = el('div', 'region' + (r.muted ? ' muted' : '') + (r.id === state.selectedRegion ? ' selected' : ''));
+    var div = el('div', 'region' + (r.kind === 'midi' ? ' midi' : '') + (r.muted ? ' muted' : '') + (r.id === state.selectedRegion ? ' selected' : ''));
     div.dataset.region = r.id;
     var left = samplesToPx(r.position);
     var width = Math.max(4, samplesToPx(r.length));
@@ -337,7 +344,7 @@
     canvas.height = LANE_HEIGHT - 22;
     div.appendChild(canvas);
     div.appendChild(el('span', 'region-name', r.name));
-    drawPeaks(canvas, r);
+    if (r.kind === 'midi') drawNotes(canvas, r); else drawPeaks(canvas, r);
     if (r.fade_in !== undefined) {
       var svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
       svg.setAttribute('class', 'fades');
@@ -461,6 +468,33 @@
     });
   }
 
+  /* a MIDI region's notes, as a miniature piano roll */
+  function drawNotes(canvas, r) {
+    var paint = function (notes) {
+      var ctx = canvas.getContext('2d');
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      if (!notes.length) return;
+      var lo = 127, hi = 0;
+      notes.forEach(function (n) { lo = Math.min(lo, n.note); hi = Math.max(hi, n.note); });
+      lo -= 2; hi += 2;
+      var rows = hi - lo + 1, rowH = Math.max(1, Math.min(6, canvas.height / rows));
+      var top = (canvas.height - rows * rowH) / 2;
+      var perBeat = canvas.width / Math.max(0.001, r.length_beats);
+      ctx.fillStyle = 'rgba(200,255,215,0.9)';
+      notes.forEach(function (n) {
+        var x = (n.start - r.start_beats) * perBeat;
+        ctx.fillRect(x, top + (hi - n.note) * rowH, Math.max(2, n.length * perBeat - 1), Math.max(1, rowH - 1));
+      });
+    };
+    var cached = state.notes[r.id];
+    if (cached) { paint(cached); return; }
+    call('region.notes', { id: r.id }).then(function (reply) {
+      if (!reply.ok) return;
+      state.notes[r.id] = reply.notes;
+      paint(reply.notes);
+    });
+  }
+
   function attachDrag(div, track, r) {
     var start = null;
     div.addEventListener('pointerdown', function (e) {
@@ -528,18 +562,35 @@
     $('mute-region').textContent = found && found.region.muted ? 'Unmute' : 'Mute';
     var track = state.timeline && state.timeline.tracks.filter(function (t) { return t.id === state.selectedTrack; })[0];
     $('tone').disabled = !track || track.kind !== 'audio';
+    $('midi-region').disabled = !track || track.kind !== 'midi';
+    $('edit-notes').disabled = !found || found.region.kind !== 'midi';
     $('import').disabled = !track || track.kind !== 'audio';
     $('import').style.display = window.ArdourBridge.canPickFiles() ? '' : 'none';
   }
 
   $('add-track').onsubmit = function (e) {
     e.preventDefault();
-    var params = { name: $('track-name').value.trim() || 'Audio', channels: Number($('track-channels').value) };
+    var kind = $('track-kind').value;
+    var params = kind === 'midi'
+      ? { kind: 'midi', name: $('track-name').value.trim() || 'MIDI' }
+      : { name: $('track-name').value.trim() || 'Audio', channels: Number($('track-channels').value) };
     call('tracks.add', params).then(checked).then(function (r) {
       state.selectedTrack = r.id;
       return refreshAll();
     }).catch(ignore);
   };
+
+  $('track-kind').onchange = function () {
+    $('track-channels').style.display = $('track-kind').value === 'midi' ? 'none' : '';
+  };
+
+  $('midi-region').onclick = function () {
+    if (!state.selectedTrack) return;
+    call('regions.midi', { track: state.selectedTrack, position: state.position, beats: 8 })
+      .then(checked).then(function (r) { state.selectedRegion = r.region.id; return refreshTimeline(); }).catch(ignore);
+  };
+
+  $('edit-notes').onclick = function () { if (state.selectedRegion) openRoll(state.selectedRegion); };
 
   $('tone').onclick = function () {
     if (!state.selectedTrack) return;
@@ -601,7 +652,8 @@
     return call('mixer.strips').then(function (r) {
       if (!r.ok) return;
       var sameShape = r.strips.length === state.strips.length && r.strips.every(function (s, i) {
-        return state.strips[i].id === s.id && state.strips[i].name === s.name;
+        return state.strips[i].id === s.id && state.strips[i].name === s.name &&
+          pluginKey(state.strips[i]) === pluginKey(s);
       });
       state.strips = r.strips;
       if (sameShape && $('strips').children.length) {
@@ -610,6 +662,10 @@
         renderStrips();
       }
     });
+  }
+
+  function pluginKey(s) {
+    return (s.plugins || []).map(function (p) { return p.id + (p.active ? '+' : '-'); }).join(',');
   }
 
   function renderStrips() {
@@ -679,6 +735,19 @@
     body.appendChild(meters);
     div.appendChild(body);
     div.appendChild(gainLabel);
+
+    var plugs = el('div', 'strip-plugins');
+    (s.plugins || []).forEach(function (pl) {
+      var b = el('button', (pl.active ? '' : 'bypassed') + (pl.instrument ? ' instrument' : ''), pl.name);
+      b.title = pl.name + (pl.active ? '' : ' (bypassed)');
+      b.onclick = function () { openPlugin(s.id, pl.id); };
+      plugs.appendChild(b);
+    });
+    var addFx = el('button', 'add-fx', '+ FX');
+    addFx.title = 'Add a plugin';
+    addFx.onclick = function () { openPluginPicker(s.id, s.kind); };
+    plugs.appendChild(addFx);
+    div.appendChild(plugs);
 
     var buttons = el('div', 'strip-buttons');
     [['mute', 'M'], ['solo', 'S'], ['rec', 'R']].forEach(function (b) {
@@ -782,9 +851,313 @@
     poll().then(function () { polling = false; }, function () { polling = false; });
   }
 
+  /* --------------------------------------------------------------- overlay */
+
+  function openOverlay(o, title) {
+    state.overlay = o;
+    $('overlay-title').textContent = title;
+    $('overlay-tools').innerHTML = '';
+    $('overlay-body').innerHTML = '';
+    $('overlay').hidden = false;
+  }
+
+  function closeOverlay() {
+    var was = state.overlay;
+    state.overlay = null;
+    $('overlay').hidden = true;
+    $('overlay-body').innerHTML = '';
+    if (was && was.kind === 'roll') { delete state.notes[was.region]; refreshTimeline(); }
+    if (was && was.kind !== 'roll') refreshStrips();
+  }
+  $('overlay-close').onclick = closeOverlay;
+
+  function tool(label, fn, title) {
+    var b = el('button', '', label);
+    if (title) b.title = title;
+    b.onclick = fn;
+    $('overlay-tools').appendChild(b);
+    return b;
+  }
+
+  /* ------------------------------------------------------------ piano roll */
+
+  var ROLL_ROW = 14, ROLL_TOP = 108, ROLL_BOTTOM = 24;
+  var NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+  function isBlack(n) { return [1, 3, 6, 8, 10].indexOf(n % 12) >= 0; }
+  function noteName(n) { return NOTE_NAMES[n % 12] + (Math.floor(n / 12) - 1); }
+
+  function openRoll(regionId) {
+    var found = findRegion(regionId);
+    if (!found) return;
+    openOverlay({ kind: 'roll', region: regionId, selected: null, snap: 0.25, length: 1, beatPx: 48, notes: [] },
+                found.region.name);
+    var o = state.overlay;
+    var snap = el('select');
+    [['1/8', 0.125], ['1/4', 0.25], ['1/2', 0.5], ['1', 1]].forEach(function (v) {
+      var opt = el('option', '', 'snap ' + v[0]); opt.value = v[1]; if (v[1] === o.snap) opt.selected = true; snap.appendChild(opt);
+    });
+    snap.onchange = function () { o.snap = Number(snap.value); };
+    $('overlay-tools').appendChild(snap);
+    tool('−', function () { o.beatPx = Math.max(12, o.beatPx / 1.5); renderRoll(); }, 'Zoom out');
+    tool('+', function () { o.beatPx = Math.min(200, o.beatPx * 1.5); renderRoll(); }, 'Zoom in');
+    o.deleteButton = tool('Delete', function () {
+      if (o.selected === null) return;
+      call('region.note.remove', { id: o.region, note_id: o.selected }).then(checked).then(function () {
+        o.selected = null; return loadRoll();
+      }).catch(ignore);
+    }, 'Delete the selected note');
+    tool('↶', function () { call('edit.undo').then(checked).then(afterHistory).catch(ignore); }, 'Undo');
+    loadRoll(true);
+  }
+
+  function loadRoll(scroll) {
+    var o = state.overlay;
+    if (!o || o.kind !== 'roll') return Promise.resolve();
+    return call('region.notes', { id: o.region }).then(checked).then(function (r) {
+      if (state.overlay !== o) return;
+      o.notes = r.notes;
+      o.info = r.region;
+      state.notes[o.region] = r.notes;
+      renderRoll();
+      if (scroll) {
+        var sum = 0; r.notes.forEach(function (n) { sum += n.note; });
+        var centre = r.notes.length ? sum / r.notes.length : 60;
+        var body = $('overlay-body');
+        body.scrollTop = Math.max(0, (ROLL_TOP - centre) * ROLL_ROW - body.clientHeight / 2);
+      }
+    }).catch(ignore);
+  }
+
+  function renderRoll() {
+    var o = state.overlay;
+    if (!o || o.kind !== 'roll' || !o.info) return;
+    var body = $('overlay-body');
+    var keepX = body.scrollLeft, keepY = body.scrollTop;
+    body.innerHTML = '';
+    var beats = o.info.length_beats, sb = o.info.start_beats;
+    var width = Math.max(1, beats * o.beatPx);
+    var roll = el('div', 'roll');
+    var keys = el('div', 'roll-keys');
+    var grid = el('div', 'roll-grid');
+    grid.style.width = width + 'px';
+    for (var n = ROLL_TOP; n >= ROLL_BOTTOM; n--) {
+      keys.appendChild(el('div', 'roll-key' + (isBlack(n) ? ' black' : ''), n % 12 === 0 ? noteName(n) : ''));
+      grid.appendChild(el('div', 'roll-row' + (isBlack(n) ? ' black' : '')));
+    }
+    for (var b = 0; b <= beats; b++) {
+      var line = el('div', 'roll-beat' + (b % 4 === 0 ? ' bar' : ''));
+      line.style.left = (b * o.beatPx) + 'px';
+      grid.appendChild(line);
+    }
+    var yOf = function (note) { return (ROLL_TOP - note) * ROLL_ROW; };
+    o.notes.forEach(function (nt) {
+      var d = el('div', 'roll-note' + (nt.id === o.selected ? ' selected' : ''));
+      d.style.left = ((nt.start - sb) * o.beatPx) + 'px';
+      d.style.top = yOf(nt.note) + 'px';
+      d.style.width = Math.max(4, nt.length * o.beatPx) + 'px';
+      d.title = noteName(nt.note) + ' velocity ' + nt.velocity;
+      attachNoteDrag(d, nt);
+      grid.appendChild(d);
+    });
+    grid.addEventListener('click', function (e) {
+      if (e.target.classList.contains('roll-note')) return;
+      var rect = grid.getBoundingClientRect();
+      var x = e.clientX - rect.left, y = e.clientY - rect.top;
+      var pitch = ROLL_TOP - Math.floor(y / ROLL_ROW);
+      var start = Math.floor(x / o.beatPx / o.snap) * o.snap;
+      if (start >= beats) return;
+      var len = Math.min(o.length, beats - start);
+      call('region.note.add', { id: o.region, note: pitch, start: sb + start, length: len, velocity: 100 })
+        .then(checked).then(function (r) { o.selected = r.id; return loadRoll(); }).catch(ignore);
+    });
+    roll.appendChild(keys);
+    roll.appendChild(grid);
+    body.appendChild(roll);
+    body.scrollLeft = keepX; body.scrollTop = keepY;
+    o.deleteButton.disabled = o.selected === null;
+  }
+
+  /* drag a note to move it in time and pitch; drag its right end to resize */
+  function attachNoteDrag(d, nt) {
+    var drag = null;
+    d.addEventListener('pointerdown', function (e) {
+      e.stopPropagation();
+      var rect = d.getBoundingClientRect();
+      drag = { x: e.clientX, y: e.clientY, resize: e.clientX > rect.right - 10, moved: false };
+      d.setPointerCapture(e.pointerId);
+    });
+    d.addEventListener('pointermove', function (e) {
+      if (!drag) return;
+      var o = state.overlay;
+      var dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+      if (Math.abs(dx) + Math.abs(dy) > 4) drag.moved = true;
+      if (!drag.moved) return;
+      if (drag.resize) {
+        d.style.width = Math.max(4, nt.length * o.beatPx + dx) + 'px';
+      } else {
+        d.style.transform = 'translate(' + dx + 'px,' + (Math.round(dy / ROLL_ROW) * ROLL_ROW) + 'px)';
+      }
+    });
+    var end = function (e) {
+      if (!drag) return;
+      var o = state.overlay, g = drag;
+      drag = null;
+      if (!g.moved) {
+        o.selected = o.selected === nt.id ? null : nt.id;
+        renderRoll();
+        return;
+      }
+      var dx = e.clientX - g.x, dy = e.clientY - g.y;
+      var params = { id: o.region, note_id: nt.id };
+      if (g.resize) {
+        params.length = Math.max(o.snap, Math.round((nt.length + dx / o.beatPx) / o.snap) * o.snap);
+        o.length = params.length;
+      } else {
+        params.start = Math.max(o.info.start_beats, nt.start + Math.round(dx / o.beatPx / o.snap) * o.snap);
+        params.note = Math.max(0, Math.min(127, nt.note - Math.round(dy / ROLL_ROW)));
+      }
+      o.selected = nt.id;
+      call('region.note.edit', params).then(checked).then(function () { return loadRoll(); }).catch(loadRoll);
+    };
+    d.addEventListener('pointerup', end);
+    d.addEventListener('pointercancel', function () { drag = null; renderRoll(); });
+    d.addEventListener('click', function (e) { e.stopPropagation(); });
+  }
+
+  /* --------------------------------------------------------------- plugins */
+
+  function openPluginPicker(routeId, kind) {
+    var strip = state.strips.filter(function (x) { return x.id === routeId; })[0];
+    openOverlay({ kind: 'plugins', route: routeId }, 'Add a plugin to ' + (strip ? strip.name : ''));
+    call('plugins.list').then(checked).then(function (r) {
+      var o = state.overlay;
+      if (!o || o.kind !== 'plugins') return;
+      var list = el('ul', 'plugin-list');
+      var sorted = r.plugins.slice().sort(function (a, b) {
+        return (a.instrument - b.instrument) || a.name.localeCompare(b.name);
+      });
+      sorted.forEach(function (pl) {
+        if (pl.instrument && kind !== 'midi') return;
+        var li = el('li');
+        var label = el('span', '', pl.name + ' ');
+        label.appendChild(el('small', '', pl.type.toUpperCase() + (pl.category ? ' · ' + pl.category : '')));
+        li.appendChild(label);
+        var add = el('button', '', 'Add');
+        add.onclick = function () {
+          call('plugin.add', { route: routeId, id: pl.id }).then(checked).then(function (reply) {
+            refreshStrips();
+            openPlugin(routeId, reply.plugin.id, reply.plugin);
+          }).catch(ignore);
+        };
+        li.appendChild(add);
+        list.appendChild(li);
+      });
+      $('overlay-body').appendChild(list);
+    }).catch(ignore);
+  }
+
+  function formatParam(pm) {
+    if (pm.text) return pm.text;
+    return pm.integer ? String(Math.round(pm.value)) : Number(pm.value).toFixed(2);
+  }
+
+  /* the slider position (0..1000) for a parameter value, and back */
+  function paramToSlider(pm, v) {
+    if (pm.log && pm.min > 0) return Math.round(1000 * Math.log(v / pm.min) / Math.log(pm.max / pm.min));
+    return Math.round(1000 * (v - pm.min) / (pm.max - pm.min || 1));
+  }
+  function sliderToParam(pm, x) {
+    var f = x / 1000;
+    var v = pm.log && pm.min > 0 ? pm.min * Math.pow(pm.max / pm.min, f) : pm.min + f * (pm.max - pm.min);
+    return pm.integer ? Math.round(v) : v;
+  }
+
+  function openPlugin(routeId, pluginId, known) {
+    openOverlay({ kind: 'plugin', route: routeId, plugin: pluginId }, '');
+    var load = known ? Promise.resolve({ ok: true, plugin: known }) : call('plugin.get', { route: routeId, plugin: pluginId });
+    load.then(checked).then(function (r) { renderPlugin(r.plugin); }).catch(ignore);
+  }
+
+  function renderPlugin(pl) {
+    var o = state.overlay;
+    if (!o || o.kind !== 'plugin') return;
+    o.info = pl;
+    $('overlay-title').textContent = pl.name;
+    $('overlay-tools').innerHTML = '';
+    var send = function (params) {
+      params.route = o.route; params.plugin = o.plugin;
+      return call('plugin.set', params).then(checked);
+    };
+    var bypass = tool(pl.active ? 'Bypass' : 'Enable', function () {
+      send({ active: !o.info.active }).then(function (r) { renderPlugin(r.plugin); }).catch(ignore);
+    });
+    bypass.classList.toggle('on', !pl.active);
+    tool('Remove', function () {
+      call('plugin.remove', { route: o.route, plugin: o.plugin }).then(checked).then(closeOverlay).catch(ignore);
+    });
+    var body = $('overlay-body');
+    body.innerHTML = '';
+    var grid = el('div', 'plugin-params');
+    if (!pl.params.length) grid.appendChild(el('label', '', 'This plugin has no controls.'));
+    pl.params.forEach(function (pm) {
+      grid.appendChild(el('label', '', pm.name));
+      var input = el('input');
+      var val = el('span', 'val', formatParam(pm));
+      if (pm.toggled) {
+        input.type = 'checkbox';
+        input.checked = pm.value > (pm.min + pm.max) / 2;
+        input.onchange = function () {
+          send({ param: pm.index, value: input.checked ? pm.max : pm.min }).then(function (r) { updateParams(r.plugin); }).catch(ignore);
+        };
+      } else {
+        input.type = 'range'; input.min = 0; input.max = 1000; input.step = 1;
+        input.value = paramToSlider(pm, pm.value);
+        var push = throttled(function (x) {
+          return send({ param: pm.index, value: sliderToParam(pm, x) }).then(function (r) { updateParams(r.plugin); }, ignore);
+        });
+        input.oninput = function () { push(Number(input.value)); };
+      }
+      input.dataset.param = pm.index;
+      val.dataset.param = pm.index;
+      grid.appendChild(input);
+      grid.appendChild(val);
+    });
+    body.appendChild(grid);
+  }
+
+  function updateParams(pl) {
+    var o = state.overlay;
+    if (!o || o.kind !== 'plugin') return;
+    o.info = pl;
+    pl.params.forEach(function (pm) {
+      var v = document.querySelector('.plugin-params .val[data-param="' + pm.index + '"]');
+      if (v) v.textContent = formatParam(pm);
+    });
+  }
+
   /* for hosts and tests: switch views, and describe what is drawn */
   window.ArdourApp = {
-    show: function (name) { if (state.session || name === 'session') showView(name); },
+    show: function (name) {
+      if (!state.session && name !== 'session') return;
+      if (name === 'roll' || name === 'plugin') {
+        var strips = state.strips;
+        if (name === 'plugin') {
+          for (var i = 0; i < strips.length; i++) {
+            var fx = (strips[i].plugins || []).filter(function (p) { return !p.instrument; })[0];
+            if (fx) { showView('mixer'); openPlugin(strips[i].id, fx.id); return; }
+          }
+          return;
+        }
+        var tracks = state.timeline ? state.timeline.tracks : [];
+        for (var t = 0; t < tracks.length; t++) {
+          var mr = tracks[t].regions.filter(function (r) { return r.kind === 'midi'; })[0];
+          if (mr) { showView('editor'); selectRegion(mr.id, tracks[t].id); openRoll(mr.id); return; }
+        }
+        return;
+      }
+      if (state.overlay) closeOverlay();
+      showView(name);
+    },
     refresh: function () { return refreshAll(); },
     selectLastRegion: function () {
       var all = document.querySelectorAll('.region');
@@ -800,7 +1173,11 @@
         ' regions=' + document.querySelectorAll('.region').length +
         ' strips=' + document.querySelectorAll('.strip').length +
         ' selected=' + (state.selectedRegion ? 1 : 0) +
-        ' undo=' + ($('undo').disabled ? 0 : 1);
+        ' undo=' + ($('undo').disabled ? 0 : 1) +
+        ' overlay=' + (state.overlay ? state.overlay.kind : '-') +
+        ' notes=' + document.querySelectorAll('.roll-note').length +
+        ' params=' + document.querySelectorAll('.plugin-params input').length +
+        ' fx=' + document.querySelectorAll('.strip-plugins button:not(.add-fx)').length;
     }
   };
 

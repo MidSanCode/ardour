@@ -44,7 +44,11 @@
 <section id="view-editor" class="view">
   <div class="bar wrap">
     <form id="add-track">
-      <input id="track-name" placeholder="track name" value="Audio" autocomplete="off">
+      <select id="track-kind">
+        <option value="audio">Audio</option>
+        <option value="midi">MIDI</option>
+      </select>
+      <input id="track-name" placeholder="track name" autocomplete="off">
       <select id="track-channels">
         <option value="1">mono</option>
         <option value="2">stereo</option>
@@ -57,6 +61,8 @@
     <button id="redo" disabled title="Redo">&#8631;</button>
     <button id="import" title="Import a sound file onto the selected track at the playhead">Import</button>
     <button id="tone" title="Insert a test tone on the selected track at the playhead">+ Tone</button>
+    <button id="midi-region" title="Create an empty MIDI region on the selected track at the playhead">+ MIDI</button>
+    <button id="edit-notes" disabled title="Edit the notes of the selected MIDI region">Notes</button>
     <button id="split" disabled>Split</button>
     <button id="mute-region" disabled>Mute</button>
     <button id="delete-region" disabled>Delete</button>
@@ -74,7 +80,7 @@
       </div>
     </div>
   </div>
-  <p class="hint">Tap a lane to move the playhead, tap a region to select it, drag it to move it (onto another track too). On a selected region, drag its side edges to trim and its top corners to set fades.</p>
+  <p class="hint">Tap a lane to move the playhead, tap a region to select it, drag it to move it (onto another track too). On a selected region, drag its side edges to trim and its top corners to set fades. Notes opens a MIDI region in the piano roll.</p>
 </section>
 
 <section id="view-mixer" class="view">
@@ -84,6 +90,18 @@
   <div id="strips"></div>
 </section>
 </main>
+
+<div id="overlay" class="overlay" hidden>
+  <div class="panel">
+    <div class="panel-head">
+      <strong id="overlay-title"></strong>
+      <span class="spacer"></span>
+      <span id="overlay-tools"></span>
+      <button id="overlay-close" title="Close">&#10005;</button>
+    </div>
+    <div id="overlay-body"></div>
+  </div>
+</div>
 
 <p id="message" role="status"></p>
 
