@@ -36,6 +36,7 @@
 #include <glibmm/fileutils.h>
 #include <glibmm/miscutils.h>
 
+#include "pbd/basename.h"
 #include "pbd/error.h"
 #include "pbd/event_loop.h"
 #include "pbd/failed_constructor.h"
@@ -52,6 +53,13 @@
 #include "ardour/file_source.h"
 #include "ardour/filename_extensions.h"
 #include "ardour/meter.h"
+#include "ardour/midi_model.h"
+#include "ardour/midi_region.h"
+#include "ardour/midi_source.h"
+#include "ardour/midi_track.h"
+#include "ardour/plugin.h"
+#include "ardour/plugin_insert.h"
+#include "ardour/plugin_manager.h"
 #include "ardour/playlist.h"
 #include "ardour/presentation_info.h"
 #include "ardour/region_factory.h"
@@ -454,6 +462,9 @@ do_init (Paths const& paths)
 	set_env ("ARDOUR_DLL_PATH", paths.module_dir);
 	set_env ("ARDOUR_DATA_PATH", paths.data_dir);
 	set_env ("ARDOUR_CONFIG_PATH", paths.data_dir);
+	/* the bundled LV2 plugins: their descriptions are with the data files,
+	 * their code with the other native libraries (see collect-engine.sh) */
+	set_env ("LV2_PATH", Glib::build_filename (paths.data_dir, "LV2"));
 	set_env ("HOME", paths.user_dir);
 	set_env ("XDG_CONFIG_HOME", Glib::build_filename (paths.user_dir, "config"));
 	set_env ("XDG_CACHE_HOME", paths.cache_dir);
@@ -665,6 +676,26 @@ m_tracks_add (Params& p)
 	if (!e.empty ()) {
 		return e;
 	}
+	if (p["kind"] == "midi") {
+		std::string   name = p["name"].empty () ? std::string ("MIDI") : p["name"];
+		PluginInfoPtr instrument;
+		if (p["instrument"].empty ()) {
+			instrument = default_instrument ();
+		} else if (p["instrument"] != "none" && p["instrument"] != "null") {
+			instrument = find_plugin_info (p["instrument"]);
+			if (!instrument) {
+				return error_reply ("no such plugin: " + p["instrument"]);
+			}
+		}
+		std::list<std::shared_ptr<MidiTrack> > added =
+			session->new_midi_track (ChanCount (DataType::MIDI, 1), ChanCount (DataType::MIDI, 1), false,
+			                         instrument, 0, std::shared_ptr<RouteGroup> (), 1, name,
+			                         PresentationInfo::max_order, Normal, true);
+		if (added.empty ()) {
+			return error_reply ("the track could not be added");
+		}
+		return "{\"ok\":true,\"id\":" + q (added.front ()->id ().to_s ()) + ",\"name\":" + q (added.front ()->name ()) + "}";
+	}
 	std::string name = p["name"].empty () ? std::string ("Audio") : p["name"];
 	int channels = p["channels"].empty () ? 1 : atoi (p["channels"].c_str ());
 	if (channels < 1 || channels > 2) {
@@ -755,6 +786,98 @@ strip_kind (std::shared_ptr<Route> const& r)
 	return "bus";
 }
 
+/* ---------------------------------------------------------------------------
+ * plugins
+ */
+
+static const char*
+plugin_type_name (PluginType t)
+{
+	switch (t) {
+		case LV2:
+			return "lv2";
+		case LADSPA:
+			return "ladspa";
+		case Lua:
+			return "lua";
+		default:
+			return "other";
+	}
+}
+
+/* every plugin the engine can load, scanned the first time it is asked for */
+static PluginInfoList
+all_plugins ()
+{
+	static bool scanned = false;
+	PluginManager& pm = PluginManager::instance ();
+	if (!scanned) {
+		scanned = true;
+		pm.refresh (true);
+	}
+	PluginInfoList out;
+	for (auto const& l : { &pm.lv2_plugin_info (), &pm.lua_plugin_info (), &pm.ladspa_plugin_info () }) {
+		out.insert (out.end (), l->begin (), l->end ());
+	}
+	return out;
+}
+
+static PluginInfoPtr
+find_plugin_info (std::string const& id)
+{
+	for (auto const& i : all_plugins ()) {
+		if (i->unique_id == id) {
+			return i;
+		}
+	}
+	return PluginInfoPtr ();
+}
+
+/* the default instrument for new MIDI tracks: ACE Reasonable Synth, else the
+ * first instrument there is */
+static PluginInfoPtr
+default_instrument ()
+{
+	PluginInfoPtr first;
+	for (auto const& i : all_plugins ()) {
+		if (!i->is_instrument ()) {
+			continue;
+		}
+		if (i->name.find ("Reasonable") != std::string::npos) {
+			return i;
+		}
+		if (!first) {
+			first = i;
+		}
+	}
+	return first;
+}
+
+static std::vector<std::shared_ptr<PluginInsert> >
+route_plugins (std::shared_ptr<Route> const& r)
+{
+	std::vector<std::shared_ptr<PluginInsert> > out;
+	for (uint32_t n = 0;; ++n) {
+		std::shared_ptr<PluginInsert> pi = std::dynamic_pointer_cast<PluginInsert> (r->nth_plugin (n));
+		if (!pi) {
+			break;
+		}
+		out.push_back (pi);
+	}
+	return out;
+}
+
+static std::string
+plugin_brief_json (std::shared_ptr<PluginInsert> const& pi)
+{
+	std::string j = "{\"id\":" + q (pi->id ().to_s ());
+	j += ",\"name\":" + q (pi->name ());
+	j += std::string (",\"active\":") + (pi->enabled () ? "true" : "false");
+	j += std::string (",\"instrument\":") + (pi->plugin ()->get_info ()->is_instrument () ? "true" : "false");
+	j += "}";
+	return j;
+}
+
 static std::string
 strip_json (std::shared_ptr<Route> const& r)
 {
@@ -777,7 +900,13 @@ strip_json (std::shared_ptr<Route> const& r)
 
 	std::shared_ptr<AutomationControl> rec = r->rec_enable_control ();
 	j += ",\"rec\":" + (rec ? std::string (rec->get_value () > 0.5 ? "true" : "false") : std::string ("null"));
-	j += "}";
+	j += ",\"plugins\":[";
+	bool first = true;
+	for (auto const& pi : route_plugins (r)) {
+		j += (first ? "" : ",") + plugin_brief_json (pi);
+		first = false;
+	}
+	j += "]}";
 	return j;
 }
 
@@ -947,8 +1076,15 @@ region_json (std::shared_ptr<Region> const& r)
 	j += ",\"start\":" + std::to_string ((long long) r->start ().samples ());
 	j += ",\"layer\":" + std::to_string ((long long) r->layer ());
 	j += std::string (",\"muted\":") + (r->muted () ? "true" : "false");
+	std::shared_ptr<MidiRegion> mr = std::dynamic_pointer_cast<MidiRegion> (r);
+	if (mr) {
+		j += ",\"kind\":\"midi\"";
+		j += ",\"start_beats\":" + num (Temporal::DoubleableBeats (r->start ().beats ()).to_double ());
+		j += ",\"length_beats\":" + num (Temporal::DoubleableBeats (r->length ().beats ()).to_double ());
+	}
 	std::shared_ptr<AudioRegion> ar = std::dynamic_pointer_cast<AudioRegion> (r);
 	if (ar) {
+		j += ",\"kind\":\"audio\"";
 		j += ",\"fade_in\":" + std::to_string ((long long) ar->fade_in_length ().samples ());
 		j += ",\"fade_out\":" + std::to_string ((long long) ar->fade_out_length ().samples ());
 	}
@@ -1408,6 +1544,328 @@ m_region_fades (Params& p)
 	return "{\"ok\":true,\"region\":" + region_json (r) + "}";
 }
 
+/* ---------------------------------------------------------------------------
+ * MIDI regions and their notes.  Note times are in beats from the start of
+ * the region's source; a region's start_beats is where it begins in it.
+ */
+
+static std::string
+m_regions_midi (Params& p)
+{
+	std::string e = require_session ();
+	if (!e.empty ()) {
+		return e;
+	}
+	std::shared_ptr<MidiTrack> track = std::dynamic_pointer_cast<MidiTrack> (find_route (p["track"]));
+	if (!track || !track->playlist ()) {
+		return error_reply ("no such MIDI track");
+	}
+	double const beats = p["beats"].empty () ? 4.0 : atof (p["beats"].c_str ());
+	if (beats <= 0 || beats > 4096) {
+		return error_reply ("beats must be between 0 and 4096");
+	}
+	timepos_t const pos (param_samples (p, "position", session->transport_sample ()));
+	timecnt_t const length (Temporal::Beats::from_double (beats), pos);
+
+	std::shared_ptr<Source> src = session->create_midi_source_by_stealing_name (track);
+	if (!src) {
+		return error_reply ("cannot create a MIDI file in the session");
+	}
+	std::shared_ptr<Region> region;
+	{
+		PBD::PropertyList plist;
+		plist.add (ARDOUR::Properties::start, timecnt_t (Temporal::BeatTime));
+		plist.add (ARDOUR::Properties::length, length);
+		plist.add (ARDOUR::Properties::automatic, true);
+		plist.add (ARDOUR::Properties::whole_file, true);
+		plist.add (ARDOUR::Properties::name, PBD::basename_nosuffix (src->name ()));
+		region = RegionFactory::create (src, plist);
+	}
+	{
+		PBD::PropertyList plist;
+		plist.add (ARDOUR::Properties::name, region->name ());
+		region = RegionFactory::create (region, plist);
+	}
+	std::shared_ptr<Playlist> pl = track->playlist ();
+	{
+		Edit edit ("create MIDI region", pl);
+		region->set_position (pos);
+		pl->add_region (region, pos, 1.0, false);
+	}
+	return "{\"ok\":true,\"region\":" + region_json (region) + "}";
+}
+
+static std::shared_ptr<MidiRegion>
+find_midi_region (Params& p, std::string& err)
+{
+	err = require_session ();
+	if (!err.empty ()) {
+		return std::shared_ptr<MidiRegion> ();
+	}
+	std::shared_ptr<Playlist>   pl;
+	std::shared_ptr<MidiRegion> r = std::dynamic_pointer_cast<MidiRegion> (find_region (p["id"], pl));
+	if (!r || !r->model ()) {
+		err = error_reply ("no such MIDI region");
+	}
+	return r;
+}
+
+static double
+beats_d (Temporal::Beats const& b)
+{
+	return Temporal::DoubleableBeats (b).to_double ();
+}
+
+static std::string
+m_region_notes (Params& p)
+{
+	std::string                 e;
+	std::shared_ptr<MidiRegion> r = find_midi_region (p, e);
+	if (!e.empty ()) {
+		return e;
+	}
+	std::shared_ptr<MidiModel> model = r->model ();
+	std::string j = "{\"ok\":true,\"region\":" + region_json (r) + ",\"notes\":[";
+	{
+		MidiModel::ReadLock lock (model->read_lock ());
+		bool first = true;
+		for (auto const& n : model->notes ()) {
+			j += first ? "" : ",";
+			first = false;
+			j += "{\"id\":" + std::to_string ((long long) n->id ());
+			j += ",\"note\":" + std::to_string ((int) n->note ());
+			j += ",\"velocity\":" + std::to_string ((int) n->velocity ());
+			j += ",\"channel\":" + std::to_string ((int) n->channel ());
+			j += ",\"start\":" + num (beats_d (n->time ()));
+			j += ",\"length\":" + num (beats_d (n->length ())) + "}";
+		}
+	}
+	return j + "]}";
+}
+
+static int
+param_int (Params& p, std::string const& key, int dflt, int lo, int hi)
+{
+	if (!p.count (key) || p[key].empty ()) {
+		return dflt;
+	}
+	return std::max (lo, std::min (hi, atoi (p[key].c_str ())));
+}
+
+static std::string
+m_region_note_add (Params& p)
+{
+	std::string                 e;
+	std::shared_ptr<MidiRegion> r = find_midi_region (p, e);
+	if (!e.empty ()) {
+		return e;
+	}
+	double const start  = atof (p["start"].c_str ());
+	double const length = p["length"].empty () ? 1.0 : atof (p["length"].c_str ());
+	if (start < 0 || length <= 0) {
+		return error_reply ("start and length must be positive beats");
+	}
+	typedef Evoral::Note<Temporal::Beats> Note;
+	std::shared_ptr<Note> n (new Note ((uint8_t) param_int (p, "channel", 0, 0, 15),
+	                                   Temporal::Beats::from_double (start),
+	                                   Temporal::Beats::from_double (length),
+	                                   (uint8_t) param_int (p, "note", 60, 0, 127),
+	                                   (uint8_t) param_int (p, "velocity", 100, 1, 127)));
+	std::shared_ptr<MidiModel> model = r->model ();
+	MidiModel::NoteDiffCommand* cmd = model->new_note_diff_command ("add note");
+	cmd->add (n);
+	model->apply_diff_command_as_commit (*session, cmd);
+	return "{\"ok\":true,\"id\":" + std::to_string ((long long) n->id ()) + "}";
+}
+
+static std::string
+m_region_note_edit (Params& p, bool remove)
+{
+	std::string                 e;
+	std::shared_ptr<MidiRegion> r = find_midi_region (p, e);
+	if (!e.empty ()) {
+		return e;
+	}
+	std::shared_ptr<MidiModel> model = r->model ();
+	MidiModel::NotePtr         n = model->find_note ((Evoral::event_id_t) atoll (p["note_id"].c_str ()));
+	if (!n) {
+		return error_reply ("no such note");
+	}
+	MidiModel::NoteDiffCommand* cmd = model->new_note_diff_command (remove ? "remove note" : "edit note");
+	if (remove) {
+		cmd->remove (n);
+	} else {
+		typedef MidiModel::NoteDiffCommand C;
+		if (!p["note"].empty ()) {
+			cmd->change (n, C::NoteNumber, (uint8_t) param_int (p, "note", 60, 0, 127));
+		}
+		if (!p["velocity"].empty ()) {
+			cmd->change (n, C::Velocity, (uint8_t) param_int (p, "velocity", 100, 1, 127));
+		}
+		if (!p["start"].empty ()) {
+			cmd->change (n, C::StartTime, Temporal::Beats::from_double (std::max (0.0, atof (p["start"].c_str ()))));
+		}
+		if (!p["length"].empty ()) {
+			cmd->change (n, C::Length, Temporal::Beats::from_double (std::max (1.0 / 64, atof (p["length"].c_str ()))));
+		}
+	}
+	model->apply_diff_command_as_commit (*session, cmd);
+	return "{\"ok\":true}";
+}
+
+/* ---------------------------------------------------------------------------
+ * plugins on routes
+ */
+
+static std::string
+m_plugins_list (Params& p)
+{
+	bool const instruments = p["instruments"] == "true";
+	std::string j = "{\"ok\":true,\"plugins\":[";
+	bool first = true;
+	for (auto const& i : all_plugins ()) {
+		if (instruments && !i->is_instrument ()) {
+			continue;
+		}
+		j += first ? "" : ",";
+		first = false;
+		j += "{\"id\":" + q (i->unique_id) + ",\"name\":" + q (i->name);
+		j += ",\"type\":" + q (plugin_type_name (i->type)) + ",\"category\":" + q (i->category);
+		j += ",\"creator\":" + q (i->creator);
+		j += std::string (",\"instrument\":") + (i->is_instrument () ? "true" : "false") + "}";
+	}
+	return j + "]}";
+}
+
+static std::shared_ptr<PluginInsert>
+find_insert (Params& p, std::shared_ptr<Route>& route, std::string& err)
+{
+	err = require_session ();
+	if (!err.empty ()) {
+		return std::shared_ptr<PluginInsert> ();
+	}
+	route = find_route (p["route"]);
+	if (!route) {
+		err = error_reply ("no such track or bus");
+		return std::shared_ptr<PluginInsert> ();
+	}
+	std::shared_ptr<PluginInsert> pi = std::dynamic_pointer_cast<PluginInsert> (route->processor_by_id (PBD::ID (p["plugin"])));
+	if (!pi) {
+		err = error_reply ("no such plugin on that route");
+	}
+	return pi;
+}
+
+static std::string
+plugin_detail_json (std::shared_ptr<PluginInsert> const& pi)
+{
+	std::string j = plugin_brief_json (pi);
+	j.pop_back ();
+	j += ",\"params\":[";
+	std::shared_ptr<Plugin> plugin = pi->plugin ();
+	bool first = true;
+	for (uint32_t i = 0; i < plugin->parameter_count (); ++i) {
+		if (!plugin->parameter_is_control (i) || !plugin->parameter_is_input (i)) {
+			continue;
+		}
+		std::shared_ptr<AutomationControl> ac = pi->automation_control (Evoral::Parameter (PluginAutomation, 0, i));
+		if (!ac) {
+			continue;
+		}
+		ParameterDescriptor const& d = ac->desc ();
+		j += first ? "" : ",";
+		first = false;
+		j += "{\"index\":" + std::to_string (i);
+		j += ",\"name\":" + q (d.label.empty () ? plugin->parameter_label (i) : d.label);
+		j += ",\"value\":" + num (ac->get_value ());
+		j += ",\"min\":" + num (d.lower) + ",\"max\":" + num (d.upper);
+		j += std::string (",\"toggled\":") + (d.toggled ? "true" : "false");
+		j += std::string (",\"integer\":") + (d.integer_step || d.enumeration ? "true" : "false");
+		j += std::string (",\"log\":") + (d.logarithmic ? "true" : "false");
+		j += ",\"text\":" + q (ac->get_user_string ()) + "}";
+	}
+	return j + "]}";
+}
+
+static std::string
+m_plugin_add (Params& p)
+{
+	std::string e = require_session ();
+	if (!e.empty ()) {
+		return e;
+	}
+	std::shared_ptr<Route> route = find_route (p["route"]);
+	if (!route) {
+		return error_reply ("no such track or bus");
+	}
+	PluginInfoPtr info = find_plugin_info (p["id"]);
+	if (!info) {
+		return error_reply ("no such plugin: " + p["id"]);
+	}
+	PluginPtr plugin = info->load (*session);
+	if (!plugin) {
+		return error_reply ("the plugin did not load");
+	}
+	std::shared_ptr<Processor> pi (new PluginInsert (*session, *route, plugin));
+	Route::ProcessorStreams err;
+	if (route->add_processor (pi, p["post"] == "true" ? PostFader : PreFader, &err) != 0) {
+		return error_reply ("the plugin does not fit this route's channels");
+	}
+	return "{\"ok\":true,\"plugin\":" + plugin_detail_json (std::dynamic_pointer_cast<PluginInsert> (pi)) + "}";
+}
+
+static std::string
+m_plugin_get (Params& p)
+{
+	std::shared_ptr<Route>        route;
+	std::string                   e;
+	std::shared_ptr<PluginInsert> pi = find_insert (p, route, e);
+	if (!e.empty ()) {
+		return e;
+	}
+	return "{\"ok\":true,\"plugin\":" + plugin_detail_json (pi) + "}";
+}
+
+static std::string
+m_plugin_set (Params& p)
+{
+	std::shared_ptr<Route>        route;
+	std::string                   e;
+	std::shared_ptr<PluginInsert> pi = find_insert (p, route, e);
+	if (!e.empty ()) {
+		return e;
+	}
+	if (p.count ("active") && !p["active"].empty ()) {
+		pi->enable (truthy (p["active"]));
+	}
+	if (p.count ("param") && !p["param"].empty ()) {
+		std::shared_ptr<AutomationControl> ac =
+			pi->automation_control (Evoral::Parameter (PluginAutomation, 0, (uint32_t) atoi (p["param"].c_str ())));
+		if (!ac) {
+			return error_reply ("no such parameter");
+		}
+		ParameterDescriptor const& d = ac->desc ();
+		double v = std::max<double> (d.lower, std::min<double> (d.upper, atof (p["value"].c_str ())));
+		ac->set_value (v, PBD::Controllable::NoGroup);
+	}
+	return "{\"ok\":true,\"plugin\":" + plugin_detail_json (pi) + "}";
+}
+
+static std::string
+m_plugin_remove (Params& p)
+{
+	std::shared_ptr<Route>        route;
+	std::string                   e;
+	std::shared_ptr<PluginInsert> pi = find_insert (p, route, e);
+	if (!e.empty ()) {
+		return e;
+	}
+	if (route->remove_processor (pi) != 0) {
+		return error_reply ("the plugin could not be removed");
+	}
+	return "{\"ok\":true}";
+}
+
 static std::string
 m_history (bool undo)
 {
@@ -1532,6 +1990,16 @@ dispatch (std::string const& method, Params& p)
 	if (method == "region.trim")     return m_region_trim (p);
 	if (method == "region.fades")    return m_region_fades (p);
 	if (method == "regions.import")  return m_regions_import (p);
+	if (method == "regions.midi")    return m_regions_midi (p);
+	if (method == "region.notes")    return m_region_notes (p);
+	if (method == "region.note.add") return m_region_note_add (p);
+	if (method == "region.note.edit") return m_region_note_edit (p, false);
+	if (method == "region.note.remove") return m_region_note_edit (p, true);
+	if (method == "plugins.list")    return m_plugins_list (p);
+	if (method == "plugin.add")      return m_plugin_add (p);
+	if (method == "plugin.get")      return m_plugin_get (p);
+	if (method == "plugin.set")      return m_plugin_set (p);
+	if (method == "plugin.remove")   return m_plugin_remove (p);
 	if (method == "edit.undo")       return m_history (true);
 	if (method == "edit.redo")       return m_history (false);
 	if (method == "transport.record") return m_transport_record (p);

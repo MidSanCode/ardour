@@ -52,6 +52,22 @@
  *   region.remove    {id}
  *   region.peaks     {id, count}          min/max pairs of the first channel
  *   transport.locate {position}
+ *   tracks.add {kind: "midi", name?, instrument?}
+ *                                         a MIDI track; instrument is a plugin id, "none",
+ *                                         or left out for ACE Reasonable Synth
+ *   regions.midi     {track, position?, beats?}   an empty MIDI region
+ *   region.notes     {id}                 notes: id, note, velocity, channel, start, length
+ *                                         (beats from the start of the region's source;
+ *                                         the region reports start_beats, length_beats)
+ *   region.note.add  {id, note, start, length?, velocity?, channel?}
+ *   region.note.edit {id, note_id, note?, start?, length?, velocity?}
+ *   region.note.remove {id, note_id}
+ *   plugins.list     {instruments?}       id, name, type, category, creator, instrument
+ *   plugin.add       {route, id, post?}   inserts a plugin; replies with its parameters
+ *   plugin.get       {route, plugin}
+ *   plugin.set       {route, plugin, active?, param?, value?}
+ *   plugin.remove    {route, plugin}
+ *                                         mixer.strips lists each strip's plugins
  *   edit.undo / edit.redo                 region edits are undoable; timeline and these
  *                                         replies carry the next undo/redo names
  *
