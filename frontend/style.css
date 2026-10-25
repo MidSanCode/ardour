@@ -107,7 +107,7 @@ ul { list-style: none; padding: 0; margin: 4px 0; }
 .panel-head strong { font-size: 14px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1 1 120px; }
 #overlay-tools { order: 3; flex: 1 0 100%; display: flex; gap: 4px; flex-wrap: wrap; min-width: 0; }
 #overlay-tools:empty { display: none; }
-#overlay-body { flex: 1; min-height: 0; max-height: calc(100vh - 140px); overflow: auto; position: relative; }
+#overlay-body { flex: 1; min-height: 0; width: 0; min-width: 100%; max-height: calc(100vh - 140px); overflow: auto; position: relative; }
 
 .roll { display: flex; position: relative; }
 .roll-keys { position: sticky; left: 0; z-index: 2; background: #222; flex: none; width: 38px; }
