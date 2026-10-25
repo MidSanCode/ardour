@@ -100,12 +100,13 @@ ul { list-style: none; padding: 0; margin: 4px 0; }
 .region.midi.selected { border-color: #fff; }
 
 /* overlay panels: the piano roll, plugins */
-.overlay { box-sizing: border-box; position: fixed; inset: 0; background: rgba(0,0,0,.6); z-index: 20; display: flex; align-items: stretch; justify-content: center; padding: 8px; }
+.overlay { box-sizing: border-box; overflow: hidden; position: fixed; inset: 0; background: rgba(0,0,0,.6); z-index: 20; display: flex; align-items: stretch; justify-content: center; padding: 8px; }
 .overlay[hidden] { display: none; }
-.panel { box-sizing: border-box; min-width: 0; min-height: 0; max-height: 100%; background: #1c1c20; border: 1px solid #444; border-radius: 6px; display: flex; flex-direction: column; width: 100%; max-width: 900px; overflow: hidden; }
+.panel { box-sizing: border-box; min-width: 0; min-height: 0; max-height: 100%; width: calc(100vw - 16px); background: #1c1c20; border: 1px solid #444; border-radius: 6px; display: flex; flex-direction: column; width: 100%; max-width: 900px; overflow: hidden; }
 .panel-head { display: flex; flex: none; align-items: center; gap: 6px; padding: 6px 8px; border-bottom: 1px solid #333; flex-wrap: wrap; }
 .panel-head strong { font-size: 14px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1 1 120px; }
-#overlay-tools { display: flex; gap: 4px; flex-wrap: wrap; min-width: 0; max-width: 100%; }
+#overlay-tools { order: 3; flex: 1 0 100%; display: flex; gap: 4px; flex-wrap: wrap; min-width: 0; }
+#overlay-tools:empty { display: none; }
 #overlay-body { flex: 1; min-height: 0; max-height: calc(100vh - 140px); overflow: auto; position: relative; }
 
 .roll { display: flex; position: relative; }
