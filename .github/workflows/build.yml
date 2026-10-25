@@ -1262,11 +1262,17 @@ jobs:
             adb exec-out screencap -p > ui-editor.png
             for i in $(seq 1 30); do sleep 1; if adb logcat -d -s ArdourUI:I | grep -q 'ARDOUR_UI mixer'; then break; fi; done
             adb exec-out screencap -p > ui-mixer.png
+            for i in $(seq 1 30); do sleep 1; if adb logcat -d -s ArdourUI:I | grep -q 'ARDOUR_UI roll'; then break; fi; done
+            adb exec-out screencap -p > ui-roll.png
+            for i in $(seq 1 30); do sleep 1; if adb logcat -d -s ArdourUI:I | grep -q 'ARDOUR_UI plugin'; then break; fi; done
+            adb exec-out screencap -p > ui-plugin.png
             adb logcat -d > logcat.txt
             grep -E 'ArdourSmoke|ArdourUI|ArdourEngine|ardour' logcat.txt | tail -120
             grep -q 'ARDOUR_SMOKE PASS' logcat.txt
-            grep -E 'ARDOUR_UI editor .*lanes=2 regions=[1-9]' logcat.txt
-            grep -E 'ARDOUR_UI mixer .*strips=4' logcat.txt
+            grep -E 'ARDOUR_UI editor .*lanes=3 regions=[1-9]' logcat.txt
+            grep -E 'ARDOUR_UI mixer .*strips=5.* fx=[2-9]' logcat.txt
+            grep -E 'ARDOUR_UI roll .*overlay=roll notes=[1-9]' logcat.txt
+            grep -E 'ARDOUR_UI plugin .*overlay=plugin .*params=[1-9]' logcat.txt
 
       - name: Upload the log
         if: always()

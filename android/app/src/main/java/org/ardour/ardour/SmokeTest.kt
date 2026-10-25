@@ -121,6 +121,116 @@ object SmokeTest {
         Log.i(TAG, "recording: rolled while recording=$recording, regions on the track $before -> $after")
     }
 
+    private fun peakOf(host: EngineHost, id: String): Double {
+        var heard = -200.0
+        val meters = call(host, "meters").getJSONArray("meters")
+        for (m in 0 until meters.length()) {
+            val meter = meters.getJSONObject(m)
+            if (meter.getString("id") != id) continue
+            val peak = meter.getJSONArray("peak")
+            for (c in 0 until peak.length()) heard = Math.max(heard, peak.getDouble(c))
+        }
+        return heard
+    }
+
+    private fun stripOf(host: EngineHost, id: String): JSONObject {
+        val strips = call(host, "mixer.strips").getJSONArray("strips")
+        for (i in 0 until strips.length()) if (strips.getJSONObject(i).getString("id") == id) return strips.getJSONObject(i)
+        fail("no mixer strip for $id")
+    }
+
+    private fun noteCount(host: EngineHost, region: String) =
+        call(host, "region.notes", JSONObject().put("id", region)).getJSONArray("notes").length()
+
+    /** a MIDI track with an instrument, a MIDI region and its notes, and an effect plugin */
+    private fun checkMidiAndPlugins(host: EngineHost, rate: Long, audioTrack: String): String {
+        val plugins = call(host, "plugins.list").getJSONArray("plugins")
+        var instrument: JSONObject? = null
+        var effect: JSONObject? = null
+        for (i in 0 until plugins.length()) {
+            val p = plugins.getJSONObject(i)
+            if (p.getBoolean("instrument") && p.getString("name").contains("Reasonable")) instrument = p
+            /* the stereo variant, for the stereo track it goes on */
+            if (!p.getBoolean("instrument") && p.getString("type") == "lv2" && p.getString("name").contains("Compressor") &&
+                (effect == null || p.getString("name").lowercase().contains("stereo"))) effect = p
+        }
+        Log.i(TAG, "plugins: ${plugins.length()} available")
+        if (instrument == null) fail("ACE Reasonable Synth is not among the plugins: $plugins")
+        if (effect == null) fail("ACE Compressor is not among the plugins")
+
+        val keys = call(host, "tracks.add", JSONObject().put("kind", "midi").put("name", "Keys")
+            .put("instrument", instrument.getString("id"))).getString("id")
+        val keysPlugins = stripOf(host, keys).getJSONArray("plugins")
+        if (keysPlugins.length() != 1 || !keysPlugins.getJSONObject(0).getBoolean("instrument"))
+            fail("the MIDI track does not have its instrument: $keysPlugins")
+
+        val region = call(host, "regions.midi", JSONObject().put("track", keys).put("position", 0).put("beats", 8))
+            .getJSONObject("region")
+        val rid = region.getString("id")
+        if (region.optString("kind") != "midi" || !near(region.getDouble("length_beats"), 8.0, 0.01))
+            fail("the MIDI region is wrong: $region")
+        val ids = ArrayList<Long>()
+        for ((n, beat) in listOf(60 to 0.0, 64 to 1.0, 67 to 2.0, 72 to 3.0)) {
+            ids.add(call(host, "region.note.add", JSONObject().put("id", rid).put("note", n).put("start", beat)
+                .put("length", 0.9).put("velocity", 110)).getLong("id"))
+        }
+        if (noteCount(host, rid) != 4) fail("the notes were not added")
+        call(host, "region.note.edit", JSONObject().put("id", rid).put("note_id", ids[3]).put("note", 71).put("length", 2))
+        val edited = call(host, "region.notes", JSONObject().put("id", rid)).getJSONArray("notes")
+        var found = false
+        for (i in 0 until edited.length()) {
+            val n = edited.getJSONObject(i)
+            if (n.getInt("note") == 71 && near(n.getDouble("length"), 2.0, 0.01)) found = true
+        }
+        if (!found) fail("the note edit did not apply: $edited")
+        call(host, "region.note.remove", JSONObject().put("id", rid).put("note_id", ids[1]))
+        if (noteCount(host, rid) != 3) fail("the note was not removed")
+        call(host, "edit.undo")
+        if (noteCount(host, rid) != 4) fail("undo did not bring the note back")
+        call(host, "edit.redo")
+        if (noteCount(host, rid) != 3) fail("redo did not remove the note again")
+
+        /* the instrument plays the notes */
+        call(host, "transport.locate", JSONObject().put("position", 0))
+        Thread.sleep(300)
+        call(host, "transport.play")
+        var heard = -200.0
+        for (i in 0 until 40) {
+            Thread.sleep(100)
+            heard = Math.max(heard, peakOf(host, keys))
+            if (heard > -40) break
+        }
+        call(host, "transport.stop")
+        Thread.sleep(500)
+        if (heard <= -40) fail("the synth did not sound (peak $heard dBFS)")
+        Log.i(TAG, "synth peak $heard dBFS while the MIDI region played")
+
+        /* an effect: add, change a parameter, bypass, remove */
+        val added = call(host, "plugin.add", JSONObject().put("route", audioTrack).put("id", effect.getString("id")))
+            .getJSONObject("plugin")
+        val pid = added.getString("id")
+        val params = added.getJSONArray("params")
+        if (params.length() == 0) fail("the effect shows no parameters")
+        var param: JSONObject? = null
+        for (i in 0 until params.length()) {
+            val pp = params.getJSONObject(i)
+            if (!pp.getBoolean("toggled") && !pp.getBoolean("integer") && pp.getDouble("max") > pp.getDouble("min")) { param = pp; break }
+        }
+        if (param == null) fail("the effect has no continuous parameter: $params")
+        val target = param.getDouble("min") + (param.getDouble("max") - param.getDouble("min")) * 0.75
+        val set = call(host, "plugin.set", JSONObject().put("route", audioTrack).put("plugin", pid)
+            .put("param", param.getInt("index")).put("value", target)).getJSONObject("plugin").getJSONArray("params")
+        var value = Double.NaN
+        for (i in 0 until set.length()) if (set.getJSONObject(i).getInt("index") == param.getInt("index")) value = set.getJSONObject(i).getDouble("value")
+        if (!near(value, target, Math.abs(target) * 0.01 + 1e-3)) fail("the parameter did not change: $value, wanted $target")
+        val bypassed = call(host, "plugin.set", JSONObject().put("route", audioTrack).put("plugin", pid).put("active", false))
+        if (bypassed.getJSONObject("plugin").getBoolean("active")) fail("the effect was not bypassed")
+        call(host, "plugin.set", JSONObject().put("route", audioTrack).put("plugin", pid).put("active", true))
+        if (stripOf(host, audioTrack).getJSONArray("plugins").length() != 1) fail("the effect is not on the strip")
+        Log.i(TAG, "effect ${added.getString("name")}: ${params.length()} parameters, ${param.getString("name")} -> $value")
+        return pid
+    }
+
     private fun checkEditing(host: EngineHost, scratch: File) {
         val rate = call(host, "engine.status").optLong("sample_rate", 48000L)
 
@@ -174,6 +284,7 @@ object SmokeTest {
         if (trackRegions(host, guitar).length() != 2) fail("the region did not arrive on the other track")
 
         checkImportAndHistory(host, scratch, rate, vocals)
+        checkMidiAndPlugins(host, rate, guitar)
 
         /* material for the frontend, and a signal for the meters */
         call(host, "regions.tone", JSONObject().put("track", vocals).put("position", 0).put("seconds", 4).put("frequency", 330))

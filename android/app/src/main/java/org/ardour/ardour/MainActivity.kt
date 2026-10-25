@@ -106,13 +106,14 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * After a passing smoke test: show the editor and then the mixer, and log
+     * After a passing smoke test: show the editor, the mixer, the piano roll
+     * and a plugin's controls, and log
      * what the frontend drew for each, so CI can take a screenshot of both and
      * check that the views were filled in.
      */
     private fun showViews() {
         val handler = Handler(Looper.getMainLooper())
-        val views = listOf("editor", "mixer")
+        val views = listOf("editor", "mixer", "roll", "plugin")
         views.forEachIndexed { i, name ->
             handler.postDelayed({
                 webView?.evaluateJavascript("window.ArdourApp && ArdourApp.show('$name')", null)
