@@ -923,7 +923,11 @@
         var sum = 0; r.notes.forEach(function (n) { sum += n.note; });
         var centre = r.notes.length ? sum / r.notes.length : 60;
         var body = $('overlay-body');
-        body.scrollTop = Math.max(0, (ROLL_TOP - centre) * ROLL_ROW - body.clientHeight / 2);
+        var first = r.notes.length ? Math.min.apply(null, r.notes.map(function (n) { return n.start; })) : r.region.start_beats;
+        requestAnimationFrame(function () {
+          body.scrollTop = Math.max(0, (ROLL_TOP - centre) * ROLL_ROW - body.clientHeight / 2);
+          body.scrollLeft = Math.max(0, (first - r.region.start_beats) * o.beatPx - 20);
+        });
       }
     }).catch(ignore);
   }

@@ -100,13 +100,13 @@ ul { list-style: none; padding: 0; margin: 4px 0; }
 .region.midi.selected { border-color: #fff; }
 
 /* overlay panels: the piano roll, plugins */
-.overlay { position: fixed; inset: 0; background: rgba(0,0,0,.6); z-index: 20; display: flex; align-items: stretch; justify-content: center; padding: 8px; }
+.overlay { box-sizing: border-box; position: fixed; inset: 0; background: rgba(0,0,0,.6); z-index: 20; display: flex; align-items: stretch; justify-content: center; padding: 8px; }
 .overlay[hidden] { display: none; }
-.panel { background: #1c1c20; border: 1px solid #444; border-radius: 6px; display: flex; flex-direction: column; width: 100%; max-width: 900px; overflow: hidden; }
-.panel-head { display: flex; align-items: center; gap: 6px; padding: 6px 8px; border-bottom: 1px solid #333; flex-wrap: wrap; }
-.panel-head strong { font-size: 14px; }
+.panel { box-sizing: border-box; min-width: 0; min-height: 0; max-height: 100%; background: #1c1c20; border: 1px solid #444; border-radius: 6px; display: flex; flex-direction: column; width: 100%; max-width: 900px; overflow: hidden; }
+.panel-head { display: flex; flex: none; align-items: center; gap: 6px; padding: 6px 8px; border-bottom: 1px solid #333; flex-wrap: wrap; }
+.panel-head strong { font-size: 14px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1 1 120px; }
 #overlay-tools { display: flex; gap: 4px; flex-wrap: wrap; }
-#overlay-body { flex: 1; overflow: auto; position: relative; }
+#overlay-body { flex: 1; min-height: 0; overflow: auto; position: relative; }
 
 .roll { display: flex; position: relative; }
 .roll-keys { position: sticky; left: 0; z-index: 2; background: #222; flex: none; width: 38px; }
@@ -125,7 +125,7 @@ ul { list-style: none; padding: 0; margin: 4px 0; }
 .strip-plugins button { font-size: 10px; padding: 2px 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: left; }
 .strip-plugins button.bypassed { opacity: .5; text-decoration: line-through; }
 .strip-plugins button.instrument { border-color: #5fae7d; }
-.plugin-params { padding: 8px; display: grid; grid-template-columns: minmax(90px, 1fr) 2fr minmax(60px, auto); gap: 6px 10px; align-items: center; }
+.plugin-params { padding: 8px; display: grid; grid-template-columns: minmax(64px, auto) minmax(0, 1fr) minmax(52px, auto); gap: 6px 10px; align-items: center; }
 .plugin-params label { font-size: 12px; color: #ccc; }
 .plugin-params .val { font-size: 11px; color: #aaa; text-align: right; font-variant-numeric: tabular-nums; }
 .plugin-list { list-style: none; margin: 0; padding: 4px; }
