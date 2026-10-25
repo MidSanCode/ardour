@@ -669,6 +669,9 @@ m_tracks_list ()
 	return j;
 }
 
+static PluginInfoPtr find_plugin_info (std::string const& id);
+static PluginInfoPtr default_instrument ();
+
 static std::string
 m_tracks_add (Params& p)
 {
