@@ -40,6 +40,28 @@ if [ -d "$INST/share" ]; then
 	done
 fi
 
+# the bundled LV2 plugins.  An APK can only carry native code as
+# jniLibs/<abi>/lib*.so, and an app may only load code from where the system
+# unpacked those, so each plugin binary becomes a lib*.so there and its
+# bundle (the .ttl descriptions) goes with the data files, pointing at it
+# through a placeholder the application replaces with its native library
+# directory when it unpacks the data (EngineHost.unpackData).
+find "$INST/lib" -type d -name '*.lv2' | while read -r bundle; do
+	bname=$(basename "$bundle")
+	dest=$OUT/assets/ardour/LV2/$bname
+	mkdir -p "$dest"
+	(cd "$bundle" && find . -type f ! -name '*.so' -exec cp --parents {} "$dest/" \;)
+	for so in "$bundle"/*.so; do
+		[ -f "$so" ] || continue
+		lib="libardourlv2_$(echo "${bname%.lv2}_$(basename "$so" .so)" | tr -c 'A-Za-z0-9_\n' '_').so"
+		cp "$so" "$LIBS/$lib"
+		for ttl in "$dest"/*.ttl; do
+			sed -i "s#<$(basename "$so")>#<file://@ARDOUR_NATIVE_LIB_DIR@/$lib>#g" "$ttl"
+		done
+		echo "LV2 plugin: $bname/$(basename "$so") -> $lib"
+	done
+done
+
 # libraries the platform provides (the NDK's stable API)
 SYSTEM="libc.so libm.so libdl.so liblog.so libz.so libandroid.so libaaudio.so
 libOpenSLES.so libEGL.so libGLESv2.so libjnigraphics.so libmediandk.so

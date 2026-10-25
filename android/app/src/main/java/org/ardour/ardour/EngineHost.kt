@@ -88,6 +88,15 @@ class EngineHost(private val context: Context) {
         dest.deleteRecursively()
         dest.mkdirs()
         copyAssets(context.assets, "ardour", dest)
+        /* the LV2 bundles name their binaries through a placeholder for the
+         * native library directory (tools/android/collect-engine.sh) */
+        val libDir = context.applicationInfo.nativeLibraryDir
+        File(dest, "LV2").walkTopDown().filter { it.isFile && it.name.endsWith(".ttl") }.forEach { ttl ->
+            val text = ttl.readText()
+            if (text.contains("@ARDOUR_NATIVE_LIB_DIR@")) {
+                ttl.writeText(text.replace("@ARDOUR_NATIVE_LIB_DIR@", libDir))
+            }
+        }
         stamp.writeText(version)
         return dest
     }
