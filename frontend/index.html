@@ -63,6 +63,7 @@
     <button id="tone" title="Insert a test tone on the selected track at the playhead">+ Tone</button>
     <button id="midi-region" title="Create an empty MIDI region on the selected track at the playhead">+ MIDI</button>
     <button id="edit-notes" disabled title="Edit the notes of the selected MIDI region">Notes</button>
+    <button id="keys-toggle" title="Show the on-screen MIDI keyboard">Keys</button>
     <button id="split" disabled>Split</button>
     <button id="mute-region" disabled>Mute</button>
     <button id="delete-region" disabled>Delete</button>
@@ -80,7 +81,8 @@
       </div>
     </div>
   </div>
-  <p class="hint">Tap a lane to move the playhead, tap a region to select it, drag it to move it (onto another track too). On a selected region, drag its side edges to trim and its top corners to set fades. Notes opens a MIDI region in the piano roll.</p>
+  <div id="keyboard" hidden></div>
+  <p class="hint">Tap a lane to move the playhead, tap a region to select it, drag it to move it (onto another track too). On a selected region, drag its side edges to trim and its top corners to set fades. Notes opens a MIDI region in the piano roll. A on a track shows its automation: tap the lane to add a point, tap a point to remove it. Keys plays the selected MIDI track (and records when it is armed).</p>
 </section>
 
 <section id="view-mixer" class="view">

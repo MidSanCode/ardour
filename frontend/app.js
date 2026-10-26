@@ -27,7 +27,10 @@
     pxPerSec: 40,
     peaks: {},
     notes: {},        /* region id -> notes, for drawing MIDI regions */
-    overlay: null     /* what the overlay shows: {kind: 'roll'|'plugin'|'plugins', ...} */
+    overlay: null,    /* what the overlay shows: {kind: 'roll'|'plugin'|'plugins', ...} */
+    automation: {},   /* track id -> {control, plugin, param, data}: the automation lanes shown */
+    keyboard: false,  /* the on-screen MIDI keyboard */
+    octave: 4
   };
 
   /* ------------------------------------------------------------------ util */
@@ -295,7 +298,8 @@
     var endSeconds = Math.max(60, tl.end / state.sampleRate + 20);
     var width = Math.ceil(endSeconds * state.pxPerSec);
     $('lanes').style.width = width + 'px';
-    $('lanes').style.height = (RULER_HEIGHT + tl.tracks.length * LANE_HEIGHT) + 'px';
+    var autoLanes = tl.tracks.filter(function (t) { return state.automation[t.id]; }).length;
+    $('lanes').style.height = (RULER_HEIGHT + tl.tracks.length * LANE_HEIGHT + autoLanes * AUTO_HEIGHT) + 'px';
     renderRuler(width);
 
     heads.appendChild(el('div', 'head-spacer'));
@@ -310,6 +314,15 @@
         call('strip.set', { id: t.id, rec: !t.rec }).then(checked).then(refreshAll).catch(ignore);
       };
       row.appendChild(arm);
+      var autoBtn = el('button', 'auto-toggle' + (state.automation[t.id] ? ' on' : ''), 'A');
+      autoBtn.title = 'Show automation';
+      autoBtn.onclick = function (e) {
+        e.stopPropagation();
+        if (state.automation[t.id]) delete state.automation[t.id];
+        else state.automation[t.id] = { control: 'gain' };
+        renderTimeline();
+      };
+      row.appendChild(autoBtn);
       head.appendChild(row);
       var meter = el('div', 'meter h');
       meter.dataset.meter = t.id;
@@ -327,10 +340,190 @@
       });
       t.regions.forEach(function (r) { lane.appendChild(regionElement(t, r)); });
       rows.appendChild(lane);
+      if (state.automation[t.id]) {
+        heads.appendChild(automationHead(t));
+        rows.appendChild(automationLane(t, width));
+      }
     });
     $('playhead').style.left = samplesToPx(state.position) + 'px';
     updateRegionTools();
   }
+
+  /* ------------------------------------------------------------ automation */
+
+  var AUTO_HEIGHT = 56;
+  var AUTO_STATES = ['manual', 'play', 'write', 'touch', 'latch'];
+
+  function autoParams(t) {
+    var a = state.automation[t.id];
+    var p = { route: t.id, control: a.control };
+    if (a.control === 'plugin') { p.plugin = a.plugin; p.param = a.param; }
+    return p;
+  }
+
+  function automationHead(t) {
+    var a = state.automation[t.id];
+    var head = el('div', 'auto-head');
+    var which = el('select', 'auto-control');
+    var options = [['gain', 'Gain'], ['trim', 'Trim'], ['pan', 'Pan'], ['mute', 'Mute']];
+    var strip = state.strips.filter(function (x) { return x.id === t.id; })[0];
+    var key = a.control === 'plugin' ? 'plugin:' + a.plugin + ':' + a.param : a.control;
+    options.forEach(function (o) {
+      var opt = el('option', '', o[1]); opt.value = o[0]; which.appendChild(opt);
+    });
+    (strip && strip.plugins || []).forEach(function (pl) {
+      (a.paramsOf && a.paramsOf[pl.id] || []).forEach(function (pm) {
+        var opt = el('option', '', pl.name + ': ' + pm.name);
+        opt.value = 'plugin:' + pl.id + ':' + pm.index;
+        which.appendChild(opt);
+      });
+    });
+    which.value = key;
+    which.onchange = function () {
+      var v = which.value.split(':');
+      a.control = v[0]; a.plugin = v[1]; a.param = v[2]; a.data = null;
+      renderTimeline();
+    };
+    /* the plugin parameters are listed once they are known */
+    if (strip && strip.plugins && strip.plugins.length && !a.paramsOf) {
+      a.paramsOf = {};
+      Promise.all(strip.plugins.map(function (pl) {
+        return call('plugin.get', { route: t.id, plugin: pl.id }).then(function (r) {
+          if (r.ok) a.paramsOf[pl.id] = r.plugin.params.filter(function (pm) { return !pm.toggled; });
+        });
+      })).then(function () { if (state.automation[t.id] === a) renderTimeline(); });
+    }
+    head.appendChild(which);
+    var mode = el('select', 'auto-state');
+    AUTO_STATES.forEach(function (m) { var o = el('option', '', m); o.value = m; mode.appendChild(o); });
+    mode.value = a.data ? a.data.state : 'manual';
+    mode.onchange = function () {
+      var p = autoParams(t); p.state = mode.value;
+      call('automation.state', p).then(checked).then(function (r) { a.data = r; }).catch(ignore);
+    };
+    head.appendChild(mode);
+    return head;
+  }
+
+  function automationLane(t, width) {
+    var a = state.automation[t.id];
+    var lane = el('div', 'auto-lane');
+    lane.dataset.track = t.id;
+    var svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('width', width);
+    svg.setAttribute('height', AUTO_HEIGHT);
+    lane.appendChild(svg);
+    var yPx = function (y) { return 4 + (1 - y) * (AUTO_HEIGHT - 8); };
+    var draw = function (d) {
+      while (svg.firstChild) svg.removeChild(svg.firstChild);
+      var ns = 'http://www.w3.org/2000/svg';
+      var pts = d.points;
+      var line = document.createElementNS(ns, 'polyline');
+      var coords = [];
+      if (!pts.length) {
+        coords.push('0,' + yPx(d.y), width + ',' + yPx(d.y));
+      } else {
+        coords.push('0,' + yPx(pts[0].y));
+        pts.forEach(function (pt) { coords.push(samplesToPx(pt.t) + ',' + yPx(pt.y)); });
+        coords.push(width + ',' + yPx(pts[pts.length - 1].y));
+      }
+      line.setAttribute('points', coords.join(' '));
+      line.setAttribute('class', 'auto-line' + (pts.length ? '' : ' flat'));
+      svg.appendChild(line);
+      pts.forEach(function (pt, i) {
+        var c = document.createElementNS(ns, 'circle');
+        c.setAttribute('cx', samplesToPx(pt.t));
+        c.setAttribute('cy', yPx(pt.y));
+        c.setAttribute('r', 6);
+        c.setAttribute('class', 'auto-point');
+        c.addEventListener('click', function (e) {
+          e.stopPropagation();
+          var p = autoParams(t); p.index = i;
+          call('automation.remove', p).then(checked).then(function (r) { a.data = r; draw(r); }).catch(ignore);
+        });
+        svg.appendChild(c);
+      });
+      var mode = document.querySelectorAll('.auto-head')[Array.prototype.indexOf.call(document.querySelectorAll('.auto-lane'), lane)];
+      if (mode) mode.querySelector('.auto-state').value = d.state;
+    };
+    lane.addEventListener('click', function (e) {
+      if (e.target.classList && e.target.classList.contains('auto-point')) return;
+      var rect = lane.getBoundingClientRect();
+      var p = autoParams(t);
+      p.t = pxToSamples(e.clientX - rect.left);
+      p.y = Math.max(0, Math.min(1, 1 - (e.clientY - rect.top - 4) / (AUTO_HEIGHT - 8)));
+      call('automation.add', p).then(checked).then(function (r) { a.data = r; draw(r); }).catch(ignore);
+    });
+    if (a.data) draw(a.data);
+    call('automation.get', autoParams(t)).then(function (r) {
+      if (!r.ok) { message(r.error); return; }
+      a.data = r;
+      draw(r);
+    });
+    return lane;
+  }
+
+  /* ---------------------------------------------------- on-screen keyboard */
+
+  function renderKeyboard() {
+    var box = $('keyboard');
+    box.hidden = !state.keyboard;
+    $('keys-toggle').classList.toggle('on', state.keyboard);
+    if (!state.keyboard) return;
+    box.innerHTML = '';
+    var bar = el('div', 'kb-bar');
+    var down = el('button', '', '◀'), up = el('button', '', '▶');
+    var label = el('span', 'kb-octave', 'C' + state.octave);
+    down.onclick = function () { state.octave = Math.max(0, state.octave - 1); renderKeyboard(); };
+    up.onclick = function () { state.octave = Math.min(8, state.octave + 1); renderKeyboard(); };
+    bar.appendChild(down); bar.appendChild(label); bar.appendChild(up);
+    box.appendChild(bar);
+    var keys = el('div', 'kb-keys');
+    var base = (state.octave + 1) * 12;
+    var whites = 0;
+    for (var n = base; n < base + 25; n++) if (!isBlack(n)) whites++;
+    var w = 100 / whites, wi = 0;
+    for (n = base; n < base + 25; n++) {
+      var black = isBlack(n);
+      var k = el('div', 'kb-key' + (black ? ' black' : ''));
+      if (black) {
+        k.style.left = (wi * w - w * 0.3) + '%';
+        k.style.width = (w * 0.6) + '%';
+      } else {
+        k.style.left = (wi * w) + '%';
+        k.style.width = w + '%';
+        wi++;
+      }
+      attachKey(k, n);
+      keys.appendChild(k);
+    }
+    box.appendChild(keys);
+  }
+
+  function sendNote(note, on) {
+    var p = { note: note, on: on, velocity: 100 };
+    if (state.selectedTrack) p.track = state.selectedTrack;
+    return call('midi.send', p);
+  }
+
+  function attachKey(k, note) {
+    var held = false;
+    k.addEventListener('pointerdown', function (e) {
+      e.preventDefault();
+      k.setPointerCapture(e.pointerId);
+      held = true; k.classList.add('down');
+      sendNote(note, true);
+    });
+    var release = function () {
+      if (!held) return;
+      held = false; k.classList.remove('down');
+      sendNote(note, false);
+    };
+    k.addEventListener('pointerup', release);
+    k.addEventListener('pointercancel', release);
+  }
+
+  $('keys-toggle').onclick = function () { state.keyboard = !state.keyboard; renderKeyboard(); };
 
   function regionElement(track, r) {
     var div = el('div', 'region' + (r.kind === 'midi' ? ' midi' : '') + (r.muted ? ' muted' : '') + (r.id === state.selectedRegion ? ' selected' : ''));
@@ -907,6 +1100,19 @@
       }).catch(ignore);
     }, 'Delete the selected note');
     tool('↶', function () { call('edit.undo').then(checked).then(afterHistory).catch(ignore); }, 'Undo');
+    var vel = el('input', 'velocity');
+    vel.type = 'range'; vel.min = 1; vel.max = 127; vel.step = 1; vel.value = 100; vel.disabled = true;
+    vel.title = 'Velocity of the selected note';
+    var velLabel = el('span', 'vel-label', 'vel');
+    vel.oninput = function () { velLabel.textContent = 'vel ' + vel.value; };
+    vel.onchange = function () {
+      if (o.selected === null) return;
+      call('region.note.edit', { id: o.region, note_id: o.selected, velocity: Number(vel.value) })
+        .then(checked).then(function () { return loadRoll(); }).catch(ignore);
+    };
+    $('overlay-tools').appendChild(velLabel);
+    $('overlay-tools').appendChild(vel);
+    o.velocity = vel; o.velocityLabel = velLabel;
     loadRoll(true);
   }
 
@@ -960,6 +1166,7 @@
       d.style.top = yOf(nt.note) + 'px';
       d.style.width = Math.max(4, nt.length * o.beatPx) + 'px';
       d.title = noteName(nt.note) + ' velocity ' + nt.velocity;
+      d.style.opacity = 0.35 + 0.65 * nt.velocity / 127;
       attachNoteDrag(d, nt);
       grid.appendChild(d);
     });
@@ -979,6 +1186,10 @@
     body.appendChild(roll);
     body.scrollLeft = keepX; body.scrollTop = keepY;
     o.deleteButton.disabled = o.selected === null;
+    var sel = o.notes.filter(function (x) { return x.id === o.selected; })[0];
+    o.velocity.disabled = !sel;
+    if (sel) { o.velocity.value = sel.velocity; o.velocityLabel.textContent = 'vel ' + sel.velocity; }
+    else o.velocityLabel.textContent = 'vel';
   }
 
   /* drag a note to move it in time and pitch; drag its right end to resize */
@@ -1099,6 +1310,29 @@
     tool('Remove', function () {
       call('plugin.remove', { route: o.route, plugin: o.plugin }).then(checked).then(closeOverlay).catch(ignore);
     });
+    var presets = el('select', 'presets');
+    presets.appendChild(el('option', '', 'Presets…'));
+    $('overlay-tools').appendChild(presets);
+    call('plugin.presets', { route: o.route, plugin: o.plugin }).then(function (r) {
+      if (!r.ok) return;
+      r.presets.forEach(function (pr) {
+        var opt = el('option', '', pr.label + (pr.user ? ' (user)' : ''));
+        opt.value = pr.uri;
+        if (pr.uri === r.current) opt.selected = true;
+        presets.appendChild(opt);
+      });
+    });
+    presets.onchange = function () {
+      if (!presets.value || presets.selectedIndex === 0) return;
+      call('plugin.preset.load', { route: o.route, plugin: o.plugin, uri: presets.value })
+        .then(checked).then(function (r) { renderPlugin(r.plugin); }).catch(ignore);
+    };
+    tool('Save…', function () {
+      var name = window.prompt('Preset name');
+      if (!name) return;
+      call('plugin.preset.save', { route: o.route, plugin: o.plugin, name: name })
+        .then(checked).then(function () { renderPlugin(o.info); message('preset saved'); }).catch(ignore);
+    }, 'Save the current settings as a preset');
     var body = $('overlay-body');
     body.innerHTML = '';
     var grid = el('div', 'plugin-params');
@@ -1143,6 +1377,15 @@
   window.ArdourApp = {
     show: function (name) {
       if (!state.session && name !== 'session') return;
+      if (name === 'automation') {
+        if (state.overlay) closeOverlay();
+        showView('editor');
+        (state.timeline ? state.timeline.tracks : []).forEach(function (t) { state.automation[t.id] = { control: 'gain' }; });
+        state.keyboard = true;
+        renderTimeline();
+        renderKeyboard();
+        return;
+      }
       if (name === 'roll' || name === 'plugin') {
         var strips = state.strips;
         if (name === 'plugin') {
@@ -1181,7 +1424,9 @@
         ' overlay=' + (state.overlay ? state.overlay.kind : '-') +
         ' notes=' + document.querySelectorAll('.roll-note').length +
         ' params=' + document.querySelectorAll('.plugin-params input').length +
-        ' fx=' + document.querySelectorAll('.strip-plugins button:not(.add-fx)').length;
+        ' fx=' + document.querySelectorAll('.strip-plugins button:not(.add-fx)').length +
+        ' autopoints=' + document.querySelectorAll('.auto-point').length +
+        ' keys=' + document.querySelectorAll('#keyboard:not([hidden]) .kb-key').length;
     }
   };
 

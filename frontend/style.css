@@ -132,3 +132,27 @@ ul { list-style: none; padding: 0; margin: 4px 0; }
 .plugin-list { list-style: none; margin: 0; padding: 4px; }
 .plugin-list li { display: flex; justify-content: space-between; align-items: center; padding: 6px; border-bottom: 1px solid #2a2a2a; gap: 8px; }
 .plugin-list li small { color: #888; }
+
+/* automation lanes */
+.auto-head { height: 56px; box-sizing: border-box; padding: 3px 6px; border-bottom: 1px solid var(--line); background: #18181b; display: flex; flex-direction: column; gap: 2px; }
+.auto-head select { font-size: 11px; padding: 1px 2px; width: 100%; }
+.auto-lane { position: relative; height: 56px; box-sizing: border-box; border-bottom: 1px solid var(--line); background: #141417; }
+.auto-lane svg { position: absolute; left: 0; top: 0; }
+.auto-line { fill: none; stroke: #e0a040; stroke-width: 2; }
+.auto-line.flat { stroke-dasharray: 4 4; opacity: .6; }
+.auto-point { fill: #e0a040; stroke: #fff3d0; stroke-width: 1; }
+.track-head .auto-toggle { padding: 0 6px; font-size: 11px; font-weight: 700; line-height: 18px; }
+.track-head .auto-toggle.on, #keys-toggle.on { background: #8a6420; color: #fff; }
+
+/* on-screen keyboard */
+#keyboard { border: 1px solid var(--line); border-radius: 4px; padding: 4px; background: #18181b; }
+#keyboard[hidden] { display: none; }
+.kb-bar { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
+.kb-octave { font-size: 12px; color: #aaa; min-width: 28px; text-align: center; }
+.kb-keys { position: relative; height: 110px; touch-action: none; user-select: none; }
+.kb-key { position: absolute; top: 0; bottom: 0; box-sizing: border-box; background: #eee; border: 1px solid #555; border-radius: 0 0 3px 3px; }
+.kb-key.black { background: #222; height: 62%; bottom: auto; z-index: 1; border-color: #000; }
+.kb-key.down { background: #5fae7d; }
+.kb-key.black.down { background: #3d7a55; }
+.velocity { width: 90px; }
+.vel-label { font-size: 11px; color: #aaa; align-self: center; }
