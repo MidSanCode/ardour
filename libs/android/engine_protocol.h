@@ -68,6 +68,19 @@
  *   plugin.set       {route, plugin, active?, param?, value?}
  *   plugin.remove    {route, plugin}
  *                                         mixer.strips lists each strip's plugins
+ *   midi.send        {track?, data: "90 3c 64 ..."} or {track?, note, velocity?, on?, channel?}
+ *                                         MIDI into the engine's input, which MIDI tracks
+ *                                         hear (and record when armed)
+ *   plugin.presets   {route, plugin}      presets: uri, label, user; current
+ *   plugin.preset.load {route, plugin, uri}
+ *   plugin.preset.save {route, plugin, name}
+ *   automation.get   {route, control?, plugin?, param?}
+ *                                         control: gain (default), trim, pan, mute, plugin;
+ *                                         state, min, max, points [{t, value, y}]
+ *   automation.state {.., state}          manual, play, write, touch, latch
+ *   automation.add   {.., t, value | y}   (y is 0..1 as a fader shows it; undoable)
+ *   automation.remove {.., index}   automation.clear {..}
+ *   regions.import   now resamples a file at another rate (reply: resampled_from)
  *   edit.undo / edit.redo                 region edits are undoable; timeline and these
  *                                         replies carry the next undo/redo names
  *

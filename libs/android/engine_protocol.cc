@@ -30,6 +30,7 @@
 #include <cstring>
 
 #include <sndfile.h>
+#include <samplerate.h>
 
 #include <glib.h>
 #include <glib/gstdio.h>
@@ -38,6 +39,7 @@
 
 #include "pbd/basename.h"
 #include "pbd/error.h"
+#include "pbd/memento_command.h"
 #include "pbd/event_loop.h"
 #include "pbd/failed_constructor.h"
 #include "pbd/receiver.h"
@@ -53,6 +55,11 @@
 #include "ardour/file_source.h"
 #include "ardour/filename_extensions.h"
 #include "ardour/meter.h"
+#include "ardour/async_midi_port.h"
+#include "ardour/automation_control.h"
+#include "ardour/automation_list.h"
+#include "ardour/io.h"
+#include "ardour/midi_port.h"
 #include "ardour/midi_model.h"
 #include "ardour/midi_region.h"
 #include "ardour/midi_source.h"
@@ -670,6 +677,21 @@ m_tracks_list ()
 }
 
 static PluginInfoPtr find_plugin_info (std::string const& id);
+
+/* MIDI from the app (the on-screen keyboard, MIDI devices on Android) goes
+ * through the engine's virtual keyboard port, which MIDI tracks listen to */
+static void
+connect_midi_input (std::shared_ptr<Track> const& t)
+{
+	std::shared_ptr<AsyncMIDIPort> vk = session ? session->vkbd_output_port () : std::shared_ptr<AsyncMIDIPort> ();
+	if (!vk || !t || t->input ()->n_ports ().n_midi () == 0) {
+		return;
+	}
+	std::shared_ptr<MidiPort> in = t->input ()->midi (0);
+	if (in && !in->connected_to (vk->name ())) {
+		in->connect (vk->name ());
+	}
+}
 static PluginInfoPtr default_instrument ();
 
 static std::string
@@ -697,6 +719,7 @@ m_tracks_add (Params& p)
 		if (added.empty ()) {
 			return error_reply ("the track could not be added");
 		}
+		connect_midi_input (added.front ());
 		return "{\"ok\":true,\"id\":" + q (added.front ()->id ().to_s ()) + ",\"name\":" + q (added.front ()->name ()) + "}";
 	}
 	std::string name = p["name"].empty () ? std::string ("Audio") : p["name"];
@@ -1361,24 +1384,77 @@ m_regions_import (Params& p)
 		return error_reply ("cannot create an audio file in the session");
 	}
 
-	const sf_count_t   block = 4096;
-	std::vector<float> interleaved (block * info.channels);
-	std::vector<Sample> chan (block);
-	sf_count_t total = 0;
-	while (true) {
-		sf_count_t n = sf_readf_float (sf, &interleaved[0], block);
-		if (n <= 0) {
-			break;
+	/* a file at another rate is converted to the session's rate on the way
+	 * in, with libsamplerate working on the interleaved data */
+	bool const   resample = info.samplerate != (int) session->sample_rate ();
+	double const ratio    = (double) session->sample_rate () / (double) info.samplerate;
+	SRC_STATE*   src      = 0;
+	if (resample) {
+		int err = 0;
+		src = src_new (SRC_SINC_MEDIUM_QUALITY, info.channels, &err);
+		if (!src) {
+			sf_close (sf);
+			return error_reply ("cannot resample: " + std::string (src_strerror (err)));
 		}
+	}
+
+	const sf_count_t    block = 4096;
+	std::vector<float>  interleaved (block * info.channels);
+	std::vector<float>  converted (resample ? (size_t) ((block * ratio + 64) * info.channels) : 0);
+	std::vector<Sample> chan (std::max<size_t> (block, converted.size () / info.channels + 1));
+	sf_count_t          total = 0;
+
+	auto emit = [&] (float const* data, sf_count_t n) {
 		for (uint32_t c = 0; c < nchans; ++c) {
 			for (sf_count_t i = 0; i < n; ++i) {
-				chan[i] = interleaved[i * info.channels + c];
+				chan[i] = data[i * info.channels + c];
 			}
 			std::dynamic_pointer_cast<AudioSource> (sources[c])->write (&chan[0], n);
 		}
 		total += n;
+	};
+
+	bool failed = false;
+	while (true) {
+		sf_count_t n   = sf_readf_float (sf, &interleaved[0], block);
+		bool const end = n <= 0;
+		if (!resample) {
+			if (end) {
+				break;
+			}
+			emit (&interleaved[0], n);
+			continue;
+		}
+		SRC_DATA d;
+		memset (&d, 0, sizeof (d));
+		d.data_in       = &interleaved[0];
+		d.input_frames  = end ? 0 : n;
+		d.data_out      = &converted[0];
+		d.output_frames = converted.size () / info.channels;
+		d.src_ratio     = ratio;
+		d.end_of_input  = end ? 1 : 0;
+		do {
+			if (src_process (src, &d) != 0) {
+				failed = true;
+				break;
+			}
+			if (d.output_frames_gen > 0) {
+				emit (&converted[0], d.output_frames_gen);
+			}
+			d.data_in += d.input_frames_used * info.channels;
+			d.input_frames -= d.input_frames_used;
+		} while (!failed && (d.input_frames > 0 || (end && d.output_frames_gen > 0)));
+		if (end || failed) {
+			break;
+		}
+	}
+	if (src) {
+		src_delete (src);
 	}
 	sf_close (sf);
+	if (failed) {
+		return error_reply ("resampling failed");
+	}
 	if (total == 0) {
 		return error_reply ("no audio could be read from the file");
 	}
@@ -1386,8 +1462,8 @@ m_regions_import (Params& p)
 	samplepos_t position = param_samples (p, "position", session->transport_sample ());
 	std::shared_ptr<Region> region = place_sources (sources, total, track, position, "import audio");
 	std::string j = "{\"ok\":true,\"region\":" + region_json (region);
-	if (info.samplerate != (int) session->sample_rate ()) {
-		j += ",\"warning\":" + q ("the file's sample rate (" + std::to_string (info.samplerate) + " Hz) differs from the session's; it was not resampled");
+	if (resample) {
+		j += ",\"resampled_from\":" + std::to_string (info.samplerate);
 	}
 	return j + "}";
 }
@@ -1869,6 +1945,333 @@ m_plugin_remove (Params& p)
 	return "{\"ok\":true}";
 }
 
+/* ---------------------------------------------------------------------------
+ * MIDI input
+ */
+
+static int
+hexval (char c)
+{
+	if (c >= '0' && c <= '9') return c - '0';
+	if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+	if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+	return -1;
+}
+
+/* the length of the message a status byte starts, 0 for sysex */
+static size_t
+midi_message_length (uint8_t status)
+{
+	switch (status & 0xf0) {
+		case 0xc0:
+		case 0xd0:
+			return 2;
+		case 0xf0:
+			switch (status) {
+				case 0xf0: return 0;
+				case 0xf1: case 0xf3: return 2;
+				case 0xf2: return 3;
+				default: return 1;
+			}
+		default:
+			return 3;
+	}
+}
+
+static std::string
+m_midi_send (Params& p)
+{
+	std::string e = require_session ();
+	if (!e.empty ()) {
+		return e;
+	}
+	std::vector<uint8_t> bytes;
+	if (!p["data"].empty ()) {
+		std::string const& d = p["data"];
+		int hi = -1;
+		for (char c : d) {
+			int v = hexval (c);
+			if (v < 0) {
+				continue;
+			}
+			if (hi < 0) {
+				hi = v;
+			} else {
+				bytes.push_back ((uint8_t) (hi * 16 + v));
+				hi = -1;
+			}
+		}
+	} else {
+		int const note = atoi (p["note"].c_str ()) & 0x7f;
+		int const vel  = p["velocity"].empty () ? 100 : (atoi (p["velocity"].c_str ()) & 0x7f);
+		int const chan = atoi (p["channel"].c_str ()) & 0x0f;
+		bool const on  = p["on"] != "false";
+		bytes.push_back ((uint8_t) ((on ? 0x90 : 0x80) | chan));
+		bytes.push_back ((uint8_t) note);
+		bytes.push_back ((uint8_t) (on ? vel : 0));
+	}
+
+	/* make sure the tracks hear it */
+	if (!p["track"].empty ()) {
+		connect_midi_input (std::dynamic_pointer_cast<Track> (find_route (p["track"])));
+	} else {
+		for (auto const& t : tracks_in_order ()) {
+			if (std::dynamic_pointer_cast<MidiTrack> (t)) {
+				connect_midi_input (t);
+			}
+		}
+	}
+
+	std::shared_ptr<AsyncMIDIPort> vk = session->vkbd_output_port ();
+	if (!vk) {
+		return error_reply ("there is no MIDI input port");
+	}
+	/* one message per write; running status is expanded */
+	size_t  i = 0, sent = 0;
+	uint8_t running = 0;
+	while (i < bytes.size ()) {
+		uint8_t b = bytes[i];
+		if (b == 0xf0) {
+			size_t j = i;
+			while (j < bytes.size () && bytes[j] != 0xf7) ++j;
+			if (j < bytes.size ()) {
+				vk->write (&bytes[i], j - i + 1, 0);
+				++sent;
+			}
+			i = j + 1;
+			continue;
+		}
+		uint8_t msg[3];
+		size_t  len;
+		if (b & 0x80) {
+			if (b < 0xf0) {
+				running = b;
+			}
+			len = midi_message_length (b);
+			if (i + len > bytes.size ()) break;
+			memcpy (msg, &bytes[i], len);
+			i += len;
+		} else if (running) {
+			len = midi_message_length (running);
+			if (i + len - 1 > bytes.size ()) break;
+			msg[0] = running;
+			memcpy (msg + 1, &bytes[i], len - 1);
+			i += len - 1;
+		} else {
+			++i;
+			continue;
+		}
+		vk->write (msg, len, 0);
+		++sent;
+	}
+	return "{\"ok\":true,\"messages\":" + std::to_string (sent) + "}";
+}
+
+/* ---------------------------------------------------------------------------
+ * plugin presets
+ */
+
+static std::string
+presets_json (std::shared_ptr<PluginInsert> const& pi)
+{
+	std::shared_ptr<Plugin> plugin = pi->plugin ();
+	std::string j = "{\"ok\":true,\"current\":" + q (plugin->last_preset ().uri) + ",\"presets\":[";
+	bool first = true;
+	for (auto const& r : plugin->get_presets ()) {
+		j += first ? "" : ",";
+		first = false;
+		j += "{\"uri\":" + q (r.uri) + ",\"label\":" + q (r.label);
+		j += std::string (",\"user\":") + (r.user ? "true" : "false") + "}";
+	}
+	return j + "]}";
+}
+
+static std::string
+m_plugin_presets (Params& p)
+{
+	std::shared_ptr<Route>        route;
+	std::string                   e;
+	std::shared_ptr<PluginInsert> pi = find_insert (p, route, e);
+	if (!e.empty ()) {
+		return e;
+	}
+	return presets_json (pi);
+}
+
+static std::string
+m_plugin_preset_load (Params& p)
+{
+	std::shared_ptr<Route>        route;
+	std::string                   e;
+	std::shared_ptr<PluginInsert> pi = find_insert (p, route, e);
+	if (!e.empty ()) {
+		return e;
+	}
+	Plugin::PresetRecord const* r = pi->plugin ()->preset_by_uri (p["uri"]);
+	if (!r) {
+		return error_reply ("no such preset");
+	}
+	if (!pi->load_preset (*r)) {
+		return error_reply ("the preset did not load");
+	}
+	return "{\"ok\":true,\"plugin\":" + plugin_detail_json (pi) + "}";
+}
+
+static std::string
+m_plugin_preset_save (Params& p)
+{
+	std::shared_ptr<Route>        route;
+	std::string                   e;
+	std::shared_ptr<PluginInsert> pi = find_insert (p, route, e);
+	if (!e.empty ()) {
+		return e;
+	}
+	if (p["name"].empty ()) {
+		return error_reply ("a preset needs a name");
+	}
+	Plugin::PresetRecord r = pi->plugin ()->save_preset (p["name"]);
+	if (!r.valid) {
+		return error_reply ("the preset could not be saved");
+	}
+	return presets_json (pi);
+}
+
+/* ---------------------------------------------------------------------------
+ * automation: control is gain, trim, pan, mute, or plugin (with plugin and
+ * param).  Points are {t: samples, value, y: 0..1 as a fader shows it}.
+ */
+
+static std::shared_ptr<AutomationControl>
+find_automation (Params& p, std::string& err)
+{
+	err = require_session ();
+	if (!err.empty ()) {
+		return std::shared_ptr<AutomationControl> ();
+	}
+	std::shared_ptr<Route> route = find_route (p["route"]);
+	if (!route) {
+		err = error_reply ("no such track or bus");
+		return std::shared_ptr<AutomationControl> ();
+	}
+	std::string const&                 c = p["control"];
+	std::shared_ptr<AutomationControl> ac;
+	if (c.empty () || c == "gain") {
+		ac = route->gain_control ();
+	} else if (c == "trim") {
+		ac = route->trim_control ();
+	} else if (c == "pan") {
+		ac = route->pan_azimuth_control ();
+	} else if (c == "mute") {
+		ac = route->mute_control ();
+	} else if (c == "plugin") {
+		std::shared_ptr<PluginInsert> pi = std::dynamic_pointer_cast<PluginInsert> (route->processor_by_id (PBD::ID (p["plugin"])));
+		if (pi) {
+			ac = pi->automation_control (Evoral::Parameter (PluginAutomation, 0, (uint32_t) atoi (p["param"].c_str ())));
+		}
+	}
+	if (!ac || !ac->alist ()) {
+		err = error_reply ("that control cannot be automated");
+		return std::shared_ptr<AutomationControl> ();
+	}
+	return ac;
+}
+
+static const char*
+auto_state_name (AutoState s)
+{
+	switch (s) {
+		case Write: return "write";
+		case Touch: return "touch";
+		case Play:  return "play";
+		case Latch: return "latch";
+		default:    return "manual";
+	}
+}
+
+static std::string
+automation_json (std::shared_ptr<AutomationControl> const& ac)
+{
+	std::shared_ptr<AutomationList> al = ac->alist ();
+	ParameterDescriptor const&      d  = ac->desc ();
+	std::string j = "{\"ok\":true,\"state\":" + q (auto_state_name (al->automation_state ()));
+	j += ",\"name\":" + q (ac->name ());
+	j += ",\"min\":" + num (d.lower) + ",\"max\":" + num (d.upper);
+	j += ",\"value\":" + num (ac->get_value ()) + ",\"y\":" + num (ac->internal_to_interface (ac->get_value ()));
+	j += ",\"points\":[";
+	bool first = true;
+	for (auto const& ev : al->events ()) {
+		j += first ? "" : ",";
+		first = false;
+		j += "{\"t\":" + std::to_string ((long long) ev->when.samples ());
+		j += ",\"value\":" + num (ev->value) + ",\"y\":" + num (ac->internal_to_interface (ev->value)) + "}";
+	}
+	return j + "]}";
+}
+
+static std::string
+m_automation_get (Params& p)
+{
+	std::string                        e;
+	std::shared_ptr<AutomationControl> ac = find_automation (p, e);
+	if (!e.empty ()) {
+		return e;
+	}
+	return automation_json (ac);
+}
+
+/* an undoable change of an automation list */
+template <typename F>
+static void
+automation_edit (std::shared_ptr<AutomationList> const& al, std::string const& name, F change)
+{
+	XMLNode& before = al->get_state ();
+	change ();
+	XMLNode& after = al->get_state ();
+	session->begin_reversible_command (name);
+	session->add_command (new MementoCommand<AutomationList> (*al, &before, &after));
+	session->commit_reversible_command ();
+}
+
+static std::string
+m_automation_edit (Params& p, std::string const& what)
+{
+	std::string                        e;
+	std::shared_ptr<AutomationControl> ac = find_automation (p, e);
+	if (!e.empty ()) {
+		return e;
+	}
+	std::shared_ptr<AutomationList> al = ac->alist ();
+	if (what == "state") {
+		std::string const& s = p["state"];
+		AutoState as = s == "play" ? Play : s == "write" ? Write : s == "touch" ? Touch : s == "latch" ? Latch : Off;
+		ac->set_automation_state (as);
+	} else if (what == "add") {
+		double v;
+		if (!p["y"].empty ()) {
+			v = ac->interface_to_internal (std::max (0.0, std::min (1.0, atof (p["y"].c_str ()))));
+		} else {
+			v = atof (p["value"].c_str ());
+		}
+		ParameterDescriptor const& d = ac->desc ();
+		v = std::max<double> (d.lower, std::min<double> (d.upper, v));
+		timepos_t const when (std::max<samplepos_t> (0, atoll (p["t"].c_str ())));
+		automation_edit (al, "add automation point", [&] () { al->editor_add (when, v, false); });
+	} else if (what == "remove") {
+		int const idx = atoi (p["index"].c_str ());
+		if (idx < 0 || idx >= (int) al->events ().size ()) {
+			return error_reply ("no such point");
+		}
+		automation_edit (al, "remove automation point", [&] () {
+			AutomationList::iterator i = al->begin ();
+			std::advance (i, idx);
+			al->erase (i);
+		});
+	} else if (what == "clear") {
+		automation_edit (al, "clear automation", [&] () { al->clear (); });
+	}
+	return automation_json (ac);
+}
+
 static std::string
 m_history (bool undo)
 {
@@ -2003,6 +2406,15 @@ dispatch (std::string const& method, Params& p)
 	if (method == "plugin.get")      return m_plugin_get (p);
 	if (method == "plugin.set")      return m_plugin_set (p);
 	if (method == "plugin.remove")   return m_plugin_remove (p);
+	if (method == "midi.send")       return m_midi_send (p);
+	if (method == "plugin.presets")  return m_plugin_presets (p);
+	if (method == "plugin.preset.load") return m_plugin_preset_load (p);
+	if (method == "plugin.preset.save") return m_plugin_preset_save (p);
+	if (method == "automation.get")  return m_automation_get (p);
+	if (method == "automation.state") return m_automation_edit (p, "state");
+	if (method == "automation.add")  return m_automation_edit (p, "add");
+	if (method == "automation.remove") return m_automation_edit (p, "remove");
+	if (method == "automation.clear") return m_automation_edit (p, "clear");
 	if (method == "edit.undo")       return m_history (true);
 	if (method == "edit.redo")       return m_history (false);
 	if (method == "transport.record") return m_transport_record (p);
