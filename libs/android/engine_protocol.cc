@@ -688,8 +688,9 @@ connect_midi_input (std::shared_ptr<Track> const& t)
 		return;
 	}
 	std::shared_ptr<MidiPort> in = t->input ()->midi (0);
-	if (in && !in->connected_to (vk->name ())) {
-		in->connect (vk->name ());
+	std::string const vk_name = std::static_pointer_cast<ARDOUR::Port> (vk)->name ();
+	if (in && !in->connected_to (vk_name)) {
+		in->connect (vk_name);
 	}
 }
 static PluginInfoPtr default_instrument ();
