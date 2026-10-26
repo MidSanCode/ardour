@@ -79,6 +79,18 @@ object SmokeTest {
         val id = imported.getString("id")
         if (imported.getLong("length") != rate) fail("the imported region has the wrong length: $imported")
 
+        /* a file at another rate is resampled to the session's */
+        val other = if (rate == 22050L) 44100 else 22050
+        val wav2 = File(scratch, "smoke-import-$other.wav")
+        writeWav(wav2, other, 1.0, 440.0)
+        val resampled = call(host, "regions.import",
+            JSONObject().put("track", vocals).put("path", wav2.absolutePath).put("position", 12 * rate))
+        val rlen = resampled.getJSONObject("region").getLong("length")
+        if (resampled.optInt("resampled_from") != other || !near(rlen.toDouble(), rate.toDouble(), rate * 0.01))
+            fail("the $other Hz file was not resampled to $rate Hz: $resampled")
+        Log.i(TAG, "imported a $other Hz file as $rlen samples at $rate Hz")
+        call(host, "region.remove", JSONObject().put("id", resampled.getJSONObject("region").getString("id")))
+
         val trimmed = call(host, "region.trim",
             JSONObject().put("id", id).put("start", 5 * rate + rate / 4).put("end", 5 * rate + 3 * rate / 4)).getJSONObject("region")
         if (trimmed.getLong("position") != 5 * rate + rate / 4) fail("the front trim did not apply: $trimmed")
@@ -205,6 +217,40 @@ object SmokeTest {
         if (heard <= -40) fail("the synth did not sound (peak $heard dBFS)")
         Log.i(TAG, "synth peak $heard dBFS while the MIDI region played")
 
+        /* recording from the MIDI input (the on-screen keyboard's path) */
+        val regionsBefore = trackRegions(host, keys).length()
+        call(host, "strip.set", JSONObject().put("id", keys).put("rec", true))
+        call(host, "transport.locate", JSONObject().put("position", 10 * rate))
+        Thread.sleep(200)
+        call(host, "transport.record", JSONObject().put("enabled", true))
+        call(host, "transport.play")
+        Thread.sleep(400)
+        for (n in listOf(60, 62, 64)) {
+            call(host, "midi.send", JSONObject().put("track", keys).put("note", n).put("velocity", 90).put("on", true))
+            Thread.sleep(150)
+            call(host, "midi.send", JSONObject().put("track", keys).put("note", n).put("on", false))
+            Thread.sleep(100)
+        }
+        /* raw bytes too, as a MIDI device sends them, with running status */
+        call(host, "midi.send", JSONObject().put("track", keys).put("data", "90 43 50 47 50"))
+        Thread.sleep(150)
+        call(host, "midi.send", JSONObject().put("track", keys).put("data", "80 43 00 47 00"))
+        Thread.sleep(300)
+        call(host, "transport.stop")
+        Thread.sleep(1500)
+        call(host, "transport.record", JSONObject().put("enabled", false))
+        call(host, "strip.set", JSONObject().put("id", keys).put("rec", false))
+        val keyRegions = trackRegions(host, keys)
+        if (keyRegions.length() <= regionsBefore) fail("no MIDI region was recorded")
+        var recorded = 0
+        for (i in 0 until keyRegions.length()) {
+            val r = keyRegions.getJSONObject(i)
+            if (r.getString("id") == rid) continue
+            recorded = Math.max(recorded, noteCount(host, r.getString("id")))
+        }
+        if (recorded < 5) fail("the recorded MIDI region has $recorded notes, expected 5")
+        Log.i(TAG, "recorded $recorded MIDI notes from the input")
+
         /* an effect: add, change a parameter, bypass, remove */
         val added = call(host, "plugin.add", JSONObject().put("route", audioTrack).put("id", effect.getString("id")))
             .getJSONObject("plugin")
@@ -227,8 +273,56 @@ object SmokeTest {
         if (bypassed.getJSONObject("plugin").getBoolean("active")) fail("the effect was not bypassed")
         call(host, "plugin.set", JSONObject().put("route", audioTrack).put("plugin", pid).put("active", true))
         if (stripOf(host, audioTrack).getJSONArray("plugins").length() != 1) fail("the effect is not on the strip")
+
+        /* presets: the bundled ones load, a new one saves */
+        val presets = call(host, "plugin.presets", JSONObject().put("route", audioTrack).put("plugin", pid)).getJSONArray("presets")
+        if (presets.length() > 0) {
+            val uri = presets.getJSONObject(0).getString("uri")
+            call(host, "plugin.preset.load", JSONObject().put("route", audioTrack).put("plugin", pid).put("uri", uri))
+            val cur = call(host, "plugin.presets", JSONObject().put("route", audioTrack).put("plugin", pid)).getString("current")
+            if (cur != uri) fail("the preset $uri is not the current one ($cur)")
+        }
+        val saved = call(host, "plugin.preset.save", JSONObject().put("route", audioTrack).put("plugin", pid).put("name", "Smoke"))
+            .getJSONArray("presets")
+        var haveSaved = false
+        for (i in 0 until saved.length()) if (saved.getJSONObject(i).getString("label") == "Smoke") haveSaved = true
+        if (!haveSaved) fail("the saved preset is not listed: $saved")
+        Log.i(TAG, "presets: ${presets.length()} bundled, saving one works")
         Log.i(TAG, "effect ${added.getString("name")}: ${params.length()} parameters, ${param.getString("name")} -> $value")
         return pid
+    }
+
+    /** gain automation: points, play mode following them, undo */
+    private fun checkAutomation(host: EngineHost, rate: Long, track: String) {
+        val base = JSONObject().put("route", track).put("control", "gain")
+        fun with(vararg kv: Pair<String, Any>): JSONObject {
+            val o = JSONObject(base.toString())
+            for ((k, v) in kv) o.put(k, v)
+            return o
+        }
+        call(host, "automation.add", with("t" to 0, "value" to 1.0))
+        call(host, "automation.add", with("t" to 2 * rate, "value" to 0.1))
+        call(host, "automation.add", with("t" to 4 * rate, "value" to 0.1))
+        val extra = call(host, "automation.add", with("t" to 5 * rate, "value" to 0.5))
+        if (extra.getJSONArray("points").length() != 4) fail("automation points were not added: $extra")
+        val removed = call(host, "automation.remove", with("index" to 3))
+        if (removed.getJSONArray("points").length() != 3) fail("the automation point was not removed")
+        call(host, "edit.undo")
+        if (call(host, "automation.get", base).getJSONArray("points").length() != 4) fail("undo did not restore the point")
+        call(host, "edit.redo")
+
+        call(host, "automation.state", with("state" to "play"))
+        call(host, "transport.locate", JSONObject().put("position", 3 * rate))
+        Thread.sleep(200)
+        call(host, "transport.play")
+        Thread.sleep(400)
+        val gain = stripOf(host, track).getDouble("gain_db")
+        call(host, "transport.stop")
+        Thread.sleep(300)
+        if (!near(gain, -20.0, 1.0)) fail("gain did not follow the automation: $gain dB")
+        call(host, "automation.state", with("state" to "manual"))
+        call(host, "strip.set", JSONObject().put("id", track).put("gain_db", 0))
+        Log.i(TAG, "automation: gain followed the points to $gain dB")
     }
 
     private fun checkEditing(host: EngineHost, scratch: File) {
@@ -285,6 +379,7 @@ object SmokeTest {
 
         checkImportAndHistory(host, scratch, rate, vocals)
         checkMidiAndPlugins(host, rate, guitar)
+        checkAutomation(host, rate, guitar)
 
         /* material for the frontend, and a signal for the meters */
         call(host, "regions.tone", JSONObject().put("track", vocals).put("position", 0).put("seconds", 4).put("frequency", 330))

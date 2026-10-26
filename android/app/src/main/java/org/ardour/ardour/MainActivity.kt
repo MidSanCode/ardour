@@ -68,6 +68,7 @@ class MainActivity : AppCompatActivity() {
 
         val host = (application as ArdourApplication).engine
         host.start()
+        (application as ArdourApplication).midi
 
         val view = WebView(this)
         view.layoutParams = ViewGroup.LayoutParams(
@@ -113,7 +114,7 @@ class MainActivity : AppCompatActivity() {
      */
     private fun showViews() {
         val handler = Handler(Looper.getMainLooper())
-        val views = listOf("editor", "mixer", "roll", "plugin")
+        val views = listOf("editor", "mixer", "roll", "plugin", "automation")
         views.forEachIndexed { i, name ->
             handler.postDelayed({
                 webView?.evaluateJavascript("window.ArdourApp && ArdourApp.show('$name')", null)
