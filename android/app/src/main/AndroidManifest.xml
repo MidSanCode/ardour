@@ -4,6 +4,7 @@
     <!-- The engine and the control protocol run on the device; the network
          permission is for the websocket control surface and for the shared
          frontend loading its assets over the local transport. -->
+    <uses-feature android:name="android.software.midi" android:required="false" />
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
