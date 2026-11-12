@@ -36,6 +36,40 @@ object SmokeTest {
 
     private fun near(a: Double, b: Double, tolerance: Double) = Math.abs(a - b) <= tolerance
 
+    /**
+     * What the audio path actually did, for the CI to check from the log.
+     *
+     * The emulator runs with -noaudio, so the AAudio backend cannot open a
+     * stream there and the engine falls back to "None (Dummy)".  That is a
+     * fallback, not a failure, and the point of this line is to make the
+     * difference visible instead of hiding it: the CI job asserts the
+     * fallback explicitly, and the same line on a device says "realtime".
+     *
+     * Every field comes from engine.status / transport.state; nothing is
+     * guessed.  `advanced` is whether the transport position moved across a
+     * short sleep, which is the proof that the process cycle is really being
+     * called back (through AAudio on a device, through the dummy thread on an
+     * emulator), and `dsp` is the load that cycle reported.
+     */
+    private fun logAudioPath(host: EngineHost, where: String) {
+        val status = call(host, "engine.status")
+        val backend = status.optString("backend")
+        val rate = status.optLong("sample_rate", 0)
+        val buffer = status.optLong("buffer_size", 0)
+        val dsp = status.optDouble("dsp_load", 0.0)
+        val live = rate > 0 && buffer > 0
+
+        /* position must advance while rolling: that is the proof the cycle
+         * callback runs, whether through AAudio or the dummy thread */
+        val before = call(host, "transport.state").optLong("position", -1)
+        Thread.sleep(250)
+        val after = call(host, "transport.state").optLong("position", -1)
+        val advanced = before >= 0 && after > before
+
+        Log.i(TAG, "ARDOUR_AUDIO $where backend=\"$backend\" rate=$rate buffer=$buffer " +
+                   "dsp=${"%.4f".format(dsp)} live=$live advanced=$advanced")
+    }
+
     private fun trackRegions(host: EngineHost, trackId: String): org.json.JSONArray {
         val tracks = call(host, "timeline").getJSONArray("tracks")
         for (i in 0 until tracks.length()) {
@@ -401,6 +435,7 @@ object SmokeTest {
         call(host, "transport.stop")
         if (heard <= -30) fail("the tone did not reach the track meter (peak $heard dBFS)")
         Log.i(TAG, "track meter peak $heard dBFS while the tone played")
+        logAudioPath(host, "after-tone")
         Thread.sleep(300)
         call(host, "transport.locate", JSONObject().put("position", rate / 2))
         call(host, "session.save")
@@ -439,6 +474,7 @@ object SmokeTest {
             }
         }
         if (!rolled) throw IllegalStateException("the transport did not roll")
+        logAudioPath(host, "rolling")
         call(host, "meters")
         call(host, "transport.stop")
         call(host, "session.save")

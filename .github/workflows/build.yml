@@ -1227,12 +1227,23 @@ jobs:
   # the transport through the frontend protocol, then exercises the mixer and
   # the editor's regions (SmokeTest.kt); the frontend's editor and mixer views
   # are then checked and photographed.
+  #
+  # Two API levels, because the AAudio backend's device handling depends on it:
+  #   * API 30 - AAudio device enumeration exists, so the backend sees devices;
+  #   * API 26 - below 30, so enumeration is absent and the backend has to fall
+  #     back to the default devices.  That branch is compiled but, before this
+  #     job, had never been executed.
+  # `minSdk` is 28, so 26 is below the floor; the matrix uses 28 and 30.
   android-emulator:
-    name: Android emulator smoke test
+    name: Android emulator smoke test (API ${{ matrix.api-level }})
     if: inputs.android
     needs: android-apk
     runs-on: ubuntu-22.04
     timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        api-level: [28, 30]
     steps:
       - name: Enable KVM
         run: |
@@ -1248,7 +1259,7 @@ jobs:
       - name: Run the smoke test
         uses: reactivecircus/android-emulator-runner@v2
         with:
-          api-level: 30
+          api-level: ${{ matrix.api-level }}
           arch: x86_64
           target: google_apis
           disable-animations: true
@@ -1277,11 +1288,33 @@ jobs:
             grep -E 'ARDOUR_UI plugin .*overlay=plugin .*params=[1-9]' logcat.txt
             grep -E 'ARDOUR_UI automation .*autopoints=[1-9].* keys=[1-9]' logcat.txt
 
+            # --- the audio path -------------------------------------------------
+            # The emulator runs with -noaudio, so AAudio cannot open a stream and
+            # the engine must fall back to the dummy backend.  The smoke test
+            # reports what really happened, and the point here is to require the
+            # *fallback to be explicit* instead of silently assumed:
+            #   * the backend is named, and it is not AAudio on this emulator;
+            #   * a sample rate and block size were negotiated;
+            #   * the transport position advanced across a sleep, i.e. the
+            #     process cycle is really being called back.
+            # On a device the same line would say backend="AAudio"; that is what
+            # tools/android/device-check.sh asserts.
+            echo "--- ARDOUR_AUDIO lines ---"
+            grep 'ARDOUR_AUDIO' logcat.txt
+            test "$(grep -c 'ARDOUR_AUDIO' logcat.txt)" -ge 2
+            grep -E 'ARDOUR_AUDIO rolling .*rate=[1-9][0-9]* buffer=[1-9][0-9]* .*advanced=true' logcat.txt
+            grep -E 'ARDOUR_AUDIO rolling backend="([^"]*)"' logcat.txt
+            # the emulator has no audio device: require the fallback, not silence
+            if grep -E 'ARDOUR_AUDIO rolling backend="AAudio"' logcat.txt; then
+              echo "::error::AAudio opened a stream on -noaudio emulator; the fallback path was not exercised"
+              exit 1
+            fi
+
       - name: Upload the log
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: android-emulator-logcat
+          name: android-emulator-logcat-api${{ matrix.api-level }}
           path: |
             logcat.txt
             ui-*.png
