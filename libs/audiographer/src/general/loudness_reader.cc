@@ -19,6 +19,8 @@
 
 #include <cassert>
 
+#include "pbd/error.h"
+
 #include "audiographer/general/loudness_reader.h"
 #include "pbd/fastlog.h"
 
@@ -40,8 +42,15 @@ LoudnessReader::LoudnessReader (float sample_rate, unsigned int channels, sample
 		using namespace Vamp::HostExt;
 		PluginLoader* loader (PluginLoader::getInstance ());
 		_ebur_plugin = loader->loadPlugin ("libardourvampplugins:ebur128", sample_rate, PluginLoader::ADAPT_ALL_SAFE);
-		assert (_ebur_plugin); // should always be available
-		if (_ebur_plugin) {
+		/* The Vamp plugins are a separate module.  On the platforms that
+		 * ship them they are always there, but an embedded build may not
+		 * carry them at all, and then there is simply no loudness
+		 * measurement to normalise with - which is not a reason to stop an
+		 * export half way through. */
+		if (!_ebur_plugin) {
+			PBD::warning << "the EBU-R128 loudness plugin is not available: "
+			             << "the export cannot measure loudness" << endmsg;
+		} else {
 			_ebur_plugin->reset ();
 			if (!_ebur_plugin->initialise (channels, _bufsize, _bufsize)) {
 				delete _ebur_plugin;
@@ -54,8 +63,9 @@ LoudnessReader::LoudnessReader (float sample_rate, unsigned int channels, sample
 		using namespace Vamp::HostExt;
 		PluginLoader* loader (PluginLoader::getInstance ());
 		Vamp::Plugin* dbtp_plugin = loader->loadPlugin ("libardourvampplugins:dBTP", sample_rate, PluginLoader::ADAPT_ALL_SAFE);
-		assert (dbtp_plugin); // should always be available
 		if (!dbtp_plugin) {
+			PBD::warning << "the true-peak plugin is not available: "
+			             << "the export cannot measure true peak" << endmsg;
 			continue;
 		}
 		dbtp_plugin->reset ();

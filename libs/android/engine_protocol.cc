@@ -480,6 +480,12 @@ do_init (Paths const& paths)
 	/* the bundled LV2 plugins: their descriptions are with the data files,
 	 * their code with the other native libraries (see collect-engine.sh) */
 	set_env ("LV2_PATH", Glib::build_filename (paths.data_dir, "LV2"));
+	/* the Vamp plugin module: the EBU-R128 loudness and true-peak plugins
+	 * that the export presets measure with before normalising, and the
+	 * analysis plugins.  Its library is packaged with the others, in the
+	 * flat directory the dynamic linker unpacks them into; without this the
+	 * Vamp loader finds nothing and an export that normalises dies. */
+	set_env ("VAMP_PATH", paths.module_dir);
 	set_env ("HOME", paths.user_dir);
 	set_env ("XDG_CONFIG_HOME", Glib::build_filename (paths.user_dir, "config"));
 	set_env ("XDG_CACHE_HOME", paths.cache_dir);
