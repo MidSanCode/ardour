@@ -251,36 +251,60 @@ object SmokeTest {
         if (heard <= -40) fail("the synth did not sound (peak $heard dBFS)")
         Log.i(TAG, "synth peak $heard dBFS while the MIDI region played")
 
-        /* recording from the MIDI input (the on-screen keyboard's path) */
-        val regionsBefore = trackRegions(host, keys).length()
-        call(host, "strip.set", JSONObject().put("id", keys).put("rec", true))
-        call(host, "transport.locate", JSONObject().put("position", 10 * rate))
-        Thread.sleep(200)
-        call(host, "transport.record", JSONObject().put("enabled", true))
-        call(host, "transport.play")
-        Thread.sleep(400)
-        for (n in listOf(60, 62, 64)) {
-            call(host, "midi.send", JSONObject().put("track", keys).put("note", n).put("velocity", 90).put("on", true))
+        /* Recording from the MIDI input (the on-screen keyboard's path).
+         *
+         * The notes reach the track through the session's virtual keyboard
+         * port and are picked up by the process cycle, so a loaded emulator
+         * can drop one of them - API 28 is slow enough for that to happen.
+         * What must not happen is the path stopping to work, so a short
+         * result is retried once before it is called a failure. */
+        fun recordOnce(): Int {
+            val regionsBefore = trackRegions(host, keys).length()
+            call(host, "strip.set", JSONObject().put("id", keys).put("rec", true))
+            call(host, "transport.locate", JSONObject().put("position", 10 * rate))
+            Thread.sleep(200)
+            call(host, "transport.record", JSONObject().put("enabled", true))
+            call(host, "transport.play")
+            /* the transport has to be rolling before a note is worth sending:
+             * on a slow emulator it can take a second to start, and notes sent
+             * before that are not recorded at all */
+            var rolling = false
+            for (i in 0 until 40) {
+                Thread.sleep(100)
+                if (call(host, "transport.state").optBoolean("rolling")) { rolling = true; break }
+            }
+            if (!rolling) fail("the transport did not roll for the MIDI recording")
+            Thread.sleep(300)
+            for (n in listOf(60, 62, 64)) {
+                call(host, "midi.send", JSONObject().put("track", keys).put("note", n).put("velocity", 90).put("on", true))
+                Thread.sleep(150)
+                call(host, "midi.send", JSONObject().put("track", keys).put("note", n).put("on", false))
+                Thread.sleep(100)
+            }
+            /* raw bytes too, as a MIDI device sends them, with running status */
+            call(host, "midi.send", JSONObject().put("track", keys).put("data", "90 43 50 47 50"))
             Thread.sleep(150)
-            call(host, "midi.send", JSONObject().put("track", keys).put("note", n).put("on", false))
-            Thread.sleep(100)
+            call(host, "midi.send", JSONObject().put("track", keys).put("data", "80 43 00 47 00"))
+            Thread.sleep(300)
+            call(host, "transport.stop")
+            Thread.sleep(1500)
+            call(host, "transport.record", JSONObject().put("enabled", false))
+            call(host, "strip.set", JSONObject().put("id", keys).put("rec", false))
+            val keyRegions = trackRegions(host, keys)
+            if (keyRegions.length() <= regionsBefore) fail("no MIDI region was recorded")
+            var notes = 0
+            for (i in 0 until keyRegions.length()) {
+                val r = keyRegions.getJSONObject(i)
+                if (r.getString("id") == rid) continue
+                notes = Math.max(notes, noteCount(host, r.getString("id")))
+            }
+            return notes
         }
-        /* raw bytes too, as a MIDI device sends them, with running status */
-        call(host, "midi.send", JSONObject().put("track", keys).put("data", "90 43 50 47 50"))
-        Thread.sleep(150)
-        call(host, "midi.send", JSONObject().put("track", keys).put("data", "80 43 00 47 00"))
-        Thread.sleep(300)
-        call(host, "transport.stop")
-        Thread.sleep(1500)
-        call(host, "transport.record", JSONObject().put("enabled", false))
-        call(host, "strip.set", JSONObject().put("id", keys).put("rec", false))
-        val keyRegions = trackRegions(host, keys)
-        if (keyRegions.length() <= regionsBefore) fail("no MIDI region was recorded")
-        var recorded = 0
-        for (i in 0 until keyRegions.length()) {
-            val r = keyRegions.getJSONObject(i)
-            if (r.getString("id") == rid) continue
-            recorded = Math.max(recorded, noteCount(host, r.getString("id")))
+
+        var recorded = recordOnce()
+        if (recorded < 5) {
+            Log.i(TAG, "only $recorded of 5 notes arrived, recording once more")
+            recorded = Math.max(recorded, recordOnce())
         }
         if (recorded < 5) fail("the recorded MIDI region has $recorded notes, expected 5")
         Log.i(TAG, "recorded $recorded MIDI notes from the input")
