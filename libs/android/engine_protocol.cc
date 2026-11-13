@@ -2650,13 +2650,15 @@ m_tempo_set (Params& p)
 
 	Temporal::BBT_Argument const where = param_bar (p);
 
+	session->begin_reversible_command ("tempo");
 	Temporal::TempoMap::WritableSharedPtr map = Temporal::TempoMap::write_copy ();
 	Temporal::TempoMap::set (map);
 	XMLNode& before = map->get_state ();
 	map->set_tempo (Temporal::Tempo (bpm, note_type), where);
 	XMLNode& after = map->get_state ();
-	Temporal::TempoMap::update (map);
 	session->add_command (new Temporal::TempoCommand ("tempo", &before, &after));
+	Temporal::TempoMap::update (map);
+	session->commit_reversible_command ();
 
 	return musical_json ();
 }
@@ -2679,13 +2681,15 @@ m_meter_set (Params& p)
 
 	Temporal::BBT_Argument const where = param_bar (p);
 
+	session->begin_reversible_command ("meter");
 	Temporal::TempoMap::WritableSharedPtr map = Temporal::TempoMap::write_copy ();
 	Temporal::TempoMap::set (map);
 	XMLNode& before = map->get_state ();
 	map->set_meter (Temporal::Meter ((int8_t) beats, (int8_t) unit), where);
 	XMLNode& after = map->get_state ();
-	Temporal::TempoMap::update (map);
 	session->add_command (new Temporal::TempoCommand ("meter", &before, &after));
+	Temporal::TempoMap::update (map);
+	session->commit_reversible_command ();
 
 	return musical_json ();
 }
@@ -2707,7 +2711,8 @@ m_loop_set (Params& p)
 	bool const on = p.count ("enabled") ? truthy (p["enabled"]) : true;
 
 	Locations* locations = session->locations ();
-	XMLNode&   before    = locations->get_state ();
+	session->begin_reversible_command ("loop range");
+	XMLNode& before = locations->get_state ();
 
 	Location* loop = locations->auto_loop_location ();
 	if (loop) {
@@ -2721,6 +2726,7 @@ m_loop_set (Params& p)
 
 	XMLNode& after = locations->get_state ();
 	session->add_command (new MementoCommand<Locations> (*locations, &before, &after));
+	session->commit_reversible_command ();
 
 	return musical_json ();
 }
@@ -2739,11 +2745,13 @@ m_loop_clear ()
 		return musical_json ();
 	}
 
+	session->begin_reversible_command ("no loop");
 	XMLNode& before = locations->get_state ();
 	/* remove() drops the play loop and the location's own signal wiring */
 	locations->remove (loop);
 	XMLNode& after = locations->get_state ();
 	session->add_command (new MementoCommand<Locations> (*locations, &before, &after));
+	session->commit_reversible_command ();
 
 	return musical_json ();
 }
@@ -2815,11 +2823,13 @@ m_marker_add (Params& p)
 	std::string const name = p["name"].empty () ? std::string ("Marker") : p["name"];
 
 	Locations* locations = session->locations ();
-	XMLNode&   before    = locations->get_state ();
-	Location*  loc       = new Location (*session, timepos_t (at), timepos_t (at), name, Location::IsMark);
+	session->begin_reversible_command ("add marker");
+	XMLNode&  before = locations->get_state ();
+	Location* loc    = new Location (*session, timepos_t (at), timepos_t (at), name, Location::IsMark);
 	locations->add (loc, false);
 	XMLNode& after = locations->get_state ();
 	session->add_command (new MementoCommand<Locations> (*locations, &before, &after));
+	session->commit_reversible_command ();
 
 	return "{\"ok\":true,\"marker\":" + location_json (loc, Temporal::TempoMap::fetch ()) + "}";
 }
@@ -2839,15 +2849,18 @@ m_marker_edit (Params& p, bool remove)
 	Locations* locations = session->locations ();
 
 	if (remove) {
+		session->begin_reversible_command ("remove marker");
 		XMLNode& before = locations->get_state ();
 		locations->remove (loc);
 		XMLNode& after = locations->get_state ();
 		session->add_command (new MementoCommand<Locations> (*locations, &before, &after));
+		session->commit_reversible_command ();
 		return m_markers_list ();
 	}
 
 	samplepos_t const at = param_samples (p, "position", loc->start_sample ());
 
+	session->begin_reversible_command ("move marker");
 	XMLNode& before = loc->get_state ();
 	loc->set (timepos_t (at), timepos_t (at));
 	if (!p["name"].empty ()) {
@@ -2855,6 +2868,7 @@ m_marker_edit (Params& p, bool remove)
 	}
 	XMLNode& after = loc->get_state ();
 	session->add_command (new MementoCommand<Location> (*loc, &before, &after));
+	session->commit_reversible_command ();
 
 	return m_markers_list ();
 }
