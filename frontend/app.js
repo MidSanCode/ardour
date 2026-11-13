@@ -1507,7 +1507,9 @@
     var seconds = Math.max(60, tl.end / state.sampleRate + 20);
     return call('grid', { from: 0, to: Math.ceil(seconds * state.sampleRate), max: 400 }).then(function (r) {
       state.grid = r && r.ok ? r : null;
-      if (state.timeline) renderTimeline();
+      /* only the ruler changes, so do not rebuild the lanes and the regions
+       * (which would throw away a drag that is in progress) */
+      if (state.timeline) renderRuler(parseFloat($('lanes').style.width) || 0);
     }).catch(ignore);
   }
 
