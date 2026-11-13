@@ -83,5 +83,31 @@
     return host() === 'android' && typeof window.ArdourNative.pickAudioFile === 'function';
   }
 
-  window.ArdourBridge = { call: call, reply: reply, host: host, pickFile: pickFile, picked: picked, canPickFiles: canPickFiles };
+  /* Lets the user choose where to put a file the engine wrote (an export);
+   * resolves to where it went, or null.  Only the Android host can do this
+   * so far - a browser has no file system to write to. */
+  var saves = {};
+  function saveFile(path, name) {
+    if (!canSaveFiles()) return Promise.resolve(null);
+    return new Promise(function (resolve) {
+      var id = nextId++;
+      saves[id] = resolve;
+      window.ArdourNative.saveFile(id, path, name || '');
+    });
+  }
+
+  function saved(id, where) {
+    var resolve = saves[id];
+    if (resolve) {
+      delete saves[id];
+      resolve(where || null);
+    }
+  }
+
+  function canSaveFiles() {
+    return host() === 'android' && typeof window.ArdourNative.saveFile === 'function';
+  }
+
+  window.ArdourBridge = { call: call, reply: reply, host: host, pickFile: pickFile, picked: picked, canPickFiles: canPickFiles,
+    saveFile: saveFile, saved: saved, canSaveFiles: canSaveFiles };
 })();

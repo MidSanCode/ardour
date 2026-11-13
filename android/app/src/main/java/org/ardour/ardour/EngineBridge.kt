@@ -13,8 +13,16 @@ import android.webkit.JavascriptInterface
  * pickAudioFile(id) asks the host to let the user choose a sound file; the
  * answer arrives as ArdourBridge.picked(id, path) in the page, with path null
  * when nothing was chosen.
+ *
+ * saveFile(id, path, name) asks the host to copy a file the engine wrote (an
+ * export) to a place the user picks; the answer arrives as
+ * ArdourBridge.saved(id, uri), with uri null when the user cancelled.
  */
-class EngineBridge(private val host: EngineHost, private val picker: (Int) -> Unit) {
+class EngineBridge(
+    private val host: EngineHost,
+    private val picker: (Int) -> Unit,
+    private val saver: (Int, String, String) -> Unit
+) {
 
     @JavascriptInterface
     fun call(method: String, params: String): String = host.call(method, params)
@@ -24,4 +32,7 @@ class EngineBridge(private val host: EngineHost, private val picker: (Int) -> Un
 
     @JavascriptInterface
     fun pickAudioFile(id: Int) = picker(id)
+
+    @JavascriptInterface
+    fun saveFile(id: Int, path: String, name: String) = saver(id, path, name)
 }

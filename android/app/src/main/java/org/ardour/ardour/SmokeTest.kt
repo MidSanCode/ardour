@@ -359,6 +359,81 @@ object SmokeTest {
         Log.i(TAG, "automation: gain followed the points to $gain dB")
     }
 
+    /**
+     * Export: the presets the engine finds, and a real render of the first two
+     * seconds of the master bus.  The emulator has no audio device, so what is
+     * checked is the file itself: a WAV with the CD preset's rate and width,
+     * the length that was asked for, and audio in it rather than silence.
+     */
+    private fun checkExport(host: EngineHost, scratch: File, rate: Long) {
+        val presets = call(host, "export.presets").getJSONArray("presets")
+        if (presets.length() == 0) fail("the engine found no export presets")
+        var cd: String? = null
+        val names = StringBuilder()
+        for (i in 0 until presets.length()) {
+            val p = presets.getJSONObject(i)
+            names.append(if (i == 0) "" else ", ").append(p.getString("name"))
+            if (cd == null && p.getString("name").contains("CD")) cd = p.getString("id")
+        }
+        if (cd == null) fail("there is no CD (44.1 kHz WAV) export preset: $names")
+        Log.i(TAG, "export presets: $names")
+
+        val folder = File(scratch, "export")
+        val params = JSONObject().put("folder", folder.absolutePath)
+            .put("start", 0).put("end", 2 * rate).put("name", "smoke").put("preset", cd)
+        val reply = call(host, "export.audio", params)
+        val files = reply.getJSONArray("files")
+        if (files.length() == 0) fail("the export wrote no file: $reply")
+        val file = File(files.getJSONObject(0).getString("path"))
+        if (!file.isFile) fail("the exported file is not there: $file")
+
+        /* walk the RIFF chunks rather than assuming a 44 byte header */
+        val bytes = file.readBytes()
+        if (bytes.size < 44 || String(bytes, 0, 4) != "RIFF" || String(bytes, 8, 4) != "WAVE") {
+            fail("the export is not a WAV file: ${file.name}")
+        }
+        val bb = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+        var channels = 0
+        var sampleRate = 0
+        var bits = 0
+        var dataStart = -1
+        var dataLength = 0
+        var pos = 12
+        while (pos + 8 <= bytes.size) {
+            val id = String(bytes, pos, 4)
+            val size = bb.getInt(pos + 4)
+            when (id) {
+                "fmt " -> {
+                    channels = bb.getShort(pos + 10).toInt()
+                    sampleRate = bb.getInt(pos + 12)
+                    bits = bb.getShort(pos + 22).toInt()
+                }
+                "data" -> {
+                    dataStart = pos + 8
+                    dataLength = Math.min(size, bytes.size - dataStart)
+                }
+            }
+            pos += 8 + size + (size and 1)
+        }
+        if (channels < 1 || sampleRate < 8000 || bits != 16 || dataStart < 0) {
+            fail("unexpected WAV format: ${channels} ch, $sampleRate Hz, $bits bit")
+        }
+
+        var peak = 0
+        val frames = dataLength / (2 * channels)
+        for (i in 0 until frames * channels) {
+            val v = Math.abs(bb.getShort(dataStart + i * 2).toInt())
+            if (v > peak) peak = v
+        }
+        val seconds = frames.toDouble() / sampleRate
+        if (!near(seconds, 2.0, 0.05)) fail("the export is $seconds s long, expected 2")
+        if (peak < 1000) fail("the export is silent (peak $peak of 32767)")
+
+        Log.i(TAG, "ARDOUR_EXPORT file=${file.name} bytes=${file.length()} rate=$sampleRate " +
+                   "channels=$channels bits=$bits seconds=${"%.3f".format(seconds)} " +
+                   "peak=${"%.3f".format(peak / 32767.0)}")
+    }
+
     private fun checkEditing(host: EngineHost, scratch: File) {
         val rate = call(host, "engine.status").optLong("sample_rate", 48000L)
 
@@ -414,6 +489,7 @@ object SmokeTest {
         checkImportAndHistory(host, scratch, rate, vocals)
         checkMidiAndPlugins(host, rate, guitar)
         checkAutomation(host, rate, guitar)
+        checkExport(host, scratch, rate)
 
         /* material for the frontend, and a signal for the meters */
         call(host, "regions.tone", JSONObject().put("track", vocals).put("position", 0).put("seconds", 4).put("frequency", 330))

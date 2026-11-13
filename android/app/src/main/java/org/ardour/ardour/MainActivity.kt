@@ -25,6 +25,8 @@ class MainActivity : AppCompatActivity() {
 
     private var webView: WebView? = null
     private var pendingPick = 0
+    private var pendingSave = 0
+    private var saving: String? = null
 
     /* a sound file chosen by the user is copied into the cache, where the
      * engine can open it by path, and the path is handed to the page */
@@ -36,9 +38,27 @@ class MainActivity : AppCompatActivity() {
         }.start()
     }
 
+    /* an export the user wants to keep is copied out of the cache into the
+     * place they pick (Downloads, Drive, ...); the engine only writes inside
+     * the application's own directories */
+    private val createFile = registerForActivityResult(ActivityResultContracts.CreateDocument("*/*")) { uri ->
+        val id = pendingSave
+        val source = saving
+        saving = null
+        Thread {
+            val where = if (uri != null && source != null && copyToDocument(source, uri)) uri.toString() else null
+            runOnUiThread { answerSave(id, where) }
+        }.start()
+    }
+
     private fun answerPick(id: Int, path: String?) {
         val arg = if (path == null) "null" else JSONObject.quote(path)
         webView?.evaluateJavascript("window.ArdourBridge && ArdourBridge.picked($id, $arg)", null)
+    }
+
+    private fun answerSave(id: Int, where: String?) {
+        val arg = if (where == null) "null" else JSONObject.quote(where)
+        webView?.evaluateJavascript("window.ArdourBridge && ArdourBridge.saved($id, $arg)", null)
     }
 
     private fun displayName(uri: Uri): String {
@@ -63,6 +83,22 @@ class MainActivity : AppCompatActivity() {
         null
     }
 
+    private fun copyToDocument(path: String, uri: Uri): Boolean = try {
+        val source = File(path)
+        if (!source.isFile) {
+            false
+        } else {
+            contentResolver.openOutputStream(uri, "wt")?.use { output ->
+                source.inputStream().use { input -> input.copyTo(output) }
+            }
+            Log.i("Ardour", "saved $path to $uri")
+            true
+        }
+    } catch (t: Throwable) {
+        Log.w("Ardour", "cannot save the file: ${t.message}")
+        false
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
@@ -79,7 +115,7 @@ class MainActivity : AppCompatActivity() {
         view.settings.domStorageEnabled = true
         view.settings.allowFileAccess = true
         view.webViewClient = WebViewClient()
-        view.addJavascriptInterface(EngineBridge(host) { id ->
+        view.addJavascriptInterface(EngineBridge(host, { id ->
             runOnUiThread {
                 pendingPick = id
                 try {
@@ -88,7 +124,18 @@ class MainActivity : AppCompatActivity() {
                     answerPick(id, null)
                 }
             }
-        }, "ArdourNative")
+        }, { id, path, name ->
+            runOnUiThread {
+                pendingSave = id
+                saving = path
+                try {
+                    createFile.launch(name.ifEmpty { File(path).name })
+                } catch (t: Throwable) {
+                    saving = null
+                    answerSave(id, null)
+                }
+            }
+        }), "ArdourNative")
         view.loadUrl("file:///android_asset/web/index.html")
 
         webView = view

@@ -25,9 +25,11 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <vector>
 
 #include <cstring>
+#include <sys/stat.h>
 
 #include <sndfile.h>
 #include <samplerate.h>
@@ -36,6 +38,7 @@
 #include <glib/gstdio.h>
 #include <glibmm/fileutils.h>
 #include <glibmm/miscutils.h>
+#include <glibmm/timer.h>
 
 #include "pbd/basename.h"
 #include "pbd/error.h"
@@ -52,6 +55,9 @@
 #include "ardour/audiofilesource.h"
 #include "ardour/audioregion.h"
 #include "ardour/dB.h"
+#include "ardour/export_preset.h"
+#include "ardour/export_profile_manager.h"
+#include "ardour/export_status.h"
 #include "ardour/file_source.h"
 #include "ardour/filename_extensions.h"
 #include "ardour/meter.h"
@@ -73,6 +79,7 @@
 #include "ardour/route.h"
 #include "ardour/session.h"
 #include "ardour/session_event.h"
+#include "ardour/simple_export.h"
 #include "ardour/track.h"
 #include "ardour/types.h"
 #include "ardour/utils.h"
@@ -398,6 +405,7 @@ static bool             initialized = false;
 static BridgeEventLoop* event_loop = 0;
 static Session*         session = 0;
 static std::string      sessions_root;
+static std::string      cache_dir;
 static std::string      backend_names[2];
 
 bool
@@ -479,6 +487,7 @@ do_init (Paths const& paths)
 
 	sessions_root = Glib::build_filename (paths.user_dir, "sessions");
 	g_mkdir_with_parents (sessions_root.c_str (), 0755);
+	cache_dir = paths.cache_dir;
 
 	log_receiver.listen_to (PBD::info);
 	log_receiver.listen_to (PBD::warning);
@@ -2364,6 +2373,165 @@ m_transport_locate (Params& p)
 	return transport_json ();
 }
 
+/* ---------------------------------------------------------------------------
+ * export
+ *
+ * libardour exports on its own thread, driving the session's freewheel
+ * cycles; on the desktop the export dialog watches the status object and
+ * calls finish() when the progress bar reaches the end, and that is the call
+ * that stops freewheeling and tears the handler down.  There is no dialog
+ * here, so this does the watching.
+ */
+
+static std::string
+m_export_presets ()
+{
+	std::string e = require_session ();
+	if (!e.empty ()) {
+		return e;
+	}
+
+	ExportProfileManager manager (*session, ExportProfileManager::RangeExport);
+	SimpleExport         defaults;
+
+	std::string j = "{\"ok\":true,\"presets\":[";
+	bool        first = true;
+	for (auto const& preset : manager.get_presets ()) {
+		j += first ? "" : ",";
+		j += "{\"id\":" + q (preset->id ().to_s ()) + ",\"name\":" + q (preset->name ()) + "}";
+		first = false;
+	}
+	j += "],\"default\":" + q (defaults.preset_uuid ()) + "}";
+	return j;
+}
+
+/* the files a finished export wrote: whatever appeared in the folder since
+ * it started, because their names come from the preset's filename
+ * specification rather than from anything we chose */
+static std::string
+export_files_json (std::string const& folder, gint64 since)
+{
+	std::string j;
+	int         count = 0;
+	try {
+		Glib::Dir dir (folder);
+		for (auto const& entry : dir) {
+			std::string const path = Glib::build_filename (folder, entry);
+			GStatBuf          st;
+			if (g_stat (path.c_str (), &st) != 0 || !S_ISREG (st.st_mode)) {
+				continue;
+			}
+			if ((gint64) st.st_mtime < since) {
+				continue;
+			}
+			j += count ? "," : "";
+			j += "{\"path\":" + q (path) + ",\"name\":" + q (entry);
+			j += ",\"bytes\":" + std::to_string ((long long) st.st_size) + "}";
+			++count;
+		}
+	} catch (...) {
+	}
+	return j;
+}
+
+static std::string
+m_export_audio (Params& p)
+{
+	std::string e = require_session ();
+	if (!e.empty ()) {
+		return e;
+	}
+	if (session->transport_rolling ()) {
+		return error_reply ("stop the transport before exporting");
+	}
+
+	samplepos_t start = param_samples (p, "start", 0);
+	samplepos_t end   = param_samples (p, "end", 0);
+	if (end <= start) {
+		/* no range asked for: the whole session, as the desktop does */
+		end = std::max (end, session->current_end_sample ());
+	}
+	if (end <= start) {
+		return error_reply ("there is nothing to export");
+	}
+
+	std::string folder = p["folder"];
+	if (folder.empty ()) {
+		folder = Glib::build_filename (cache_dir, "export");
+	}
+	std::string const name = p["name"].empty () ? session->name () : p["name"];
+
+	/* SimpleExport::set_preset asserts that a preset was found, so a build
+	 * without the export formats (they are in the APK's assets) would abort
+	 * instead of replying with an error */
+	{
+		ExportProfileManager manager (*session, ExportProfileManager::RangeExport);
+		if (manager.get_presets ().empty ()) {
+			return error_reply ("there are no export presets on this device");
+		}
+	}
+
+	/* whole seconds, the resolution of the file timestamps compared below */
+	gint64 const started = g_get_real_time () / 1000000;
+
+	SimpleExport exporter;
+	exporter.set_session (session);
+	exporter.set_name (name);
+	exporter.set_folder (folder);
+	exporter.set_range (start, end);
+	if (!p["preset"].empty () && !exporter.set_preset (p["preset"])) {
+		return error_reply ("no such export preset: " + p["preset"]);
+	}
+	if (!exporter.check_outputs ()) {
+		return error_reply ("the master bus has no outputs to export");
+	}
+
+	ExportStatusPtr status = session->get_export_status ();
+	if (!exporter.run_export ()) {
+		return error_reply ("the export did not start");
+	}
+
+	long waited = 0;
+	while (status->running ()) {
+		if (status->aborted () || status->errors ()) {
+			break;
+		}
+		Glib::usleep (10000);
+		waited += 10;
+		if (waited > 1800000) {
+			/* half an hour: a range this long at real time means something
+			 * is wrong, and the transport must not be left freewheeling */
+			status->abort ();
+			break;
+		}
+	}
+	bool const timed_out = waited > 1800000;
+
+	status->finish (TRS_UI);
+
+	if (timed_out) {
+		return error_reply ("the export did not finish");
+	}
+	if (status->aborted () || status->errors ()) {
+		return error_reply ("the export failed");
+	}
+
+	std::string const files = export_files_json (folder, started - 1);
+	if (files.empty ()) {
+		return error_reply ("the export wrote no file into " + folder);
+	}
+
+	double const rate = session->sample_rate ();
+	std::string  j    = "{\"ok\":true";
+	j += ",\"folder\":" + q (folder);
+	j += ",\"preset\":" + q (exporter.preset_uuid ());
+	j += ",\"start\":" + std::to_string ((long long) start);
+	j += ",\"end\":" + std::to_string ((long long) end);
+	j += ",\"seconds\":" + num (rate > 0 ? (end - start) / rate : 0);
+	j += ",\"files\":[" + files + "]}";
+	return j;
+}
+
 static std::string
 dispatch (std::string const& method, Params& p)
 {
@@ -2421,6 +2589,8 @@ dispatch (std::string const& method, Params& p)
 	if (method == "transport.record") return m_transport_record (p);
 	if (method == "region.peaks")    return m_region_peaks (p);
 	if (method == "transport.locate") return m_transport_locate (p);
+	if (method == "export.presets")  return m_export_presets ();
+	if (method == "export.audio")    return m_export_audio (p);
 	return error_reply ("unknown method '" + method + "'");
 }
 

@@ -84,6 +84,16 @@
  *   edit.undo / edit.redo                 region edits are undoable; timeline and these
  *                                         replies carry the next undo/redo names
  *
+ *   export.presets                        the export presets found on this device:
+ *                                         id, name; and the one used by default
+ *   export.audio     {preset?, start?, end?, folder?, name?}
+ *                                         renders the master bus through libardour's
+ *                                         freewheel export; without a range it exports
+ *                                         from the start to the last region's end, and
+ *                                         without a folder it writes into <cache>/export.
+ *                                         Replies with folder, seconds and the files that
+ *                                         appeared: path, name, bytes
+ *
  * All engine work happens on one thread owned by this module, which carries
  * the event loop and the session event pool libardour expects of a "GUI"
  * thread; call() hands a request to it and waits for the reply.

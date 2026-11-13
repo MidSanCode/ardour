@@ -39,6 +39,14 @@
     <button id="save" disabled>Save</button>
     <button id="close" disabled>Close</button>
   </div>
+
+  <h2>Export</h2>
+  <form id="export-form" class="row">
+    <select id="export-preset" title="The format and settings to export with"></select>
+    <button type="submit" id="export-run" disabled>Export mix</button>
+  </form>
+  <ul id="export-files"></ul>
+  <p class="hint">Export renders the session's master bus between the start and the last region, into the folder below. On a phone the file has to be saved somewhere you can reach it.</p>
 </section>
 
 <section id="view-editor" class="view">

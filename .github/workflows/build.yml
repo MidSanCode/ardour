@@ -1306,6 +1306,17 @@ jobs:
             grep -E 'ARDOUR_AUDIO rolling .*rate=[1-9][0-9]* buffer=[1-9][0-9]* .*advanced=true' logcat.txt
             grep -E 'ARDOUR_AUDIO rolling backend="AAudio"|ARDOUR_AUDIO rolling backend="None \(Dummy\)"' logcat.txt
 
+            # --- export ---------------------------------------------------------
+            # The smoke test exports the first two seconds of the master bus
+            # with the CD preset and reads the file back: a 44.1 kHz 16 bit
+            # stereo WAV, two seconds long, with audio in it.  This is the one
+            # part of the audio path an emulator without a sound card can still
+            # prove end to end, because it goes through libardour's freewheel
+            # export and comes out as a file to inspect.
+            echo "--- ARDOUR_EXPORT line ---"
+            grep 'ARDOUR_EXPORT' logcat.txt
+            grep -E 'ARDOUR_EXPORT file=.*\.wav bytes=[1-9][0-9]* rate=44100 channels=2 bits=16 seconds=2\.0[0-9]* peak=0\.[0-9]*[1-9]' logcat.txt
+
       - name: Upload the log
         if: always()
         uses: actions/upload-artifact@v4

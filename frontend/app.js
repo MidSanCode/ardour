@@ -128,10 +128,12 @@
 
   function afterSessionChange(st) {
     applyStatus(st);
+    $('export-files').innerHTML = '';
     if (state.session) {
       showView('editor');
-      return Promise.all([refreshSessions(), refreshAll()]);
+      return Promise.all([refreshSessions(), refreshAll(), refreshExportPresets()]);
     }
+    refreshExportPresets();
     return refreshSessions();
   }
 
@@ -189,6 +191,68 @@
 
   $('save').onclick = function () { call('session.save').then(checked).then(function () { message('saved'); }).catch(ignore); };
   $('close').onclick = function () { call('session.close').then(checked).then(afterSessionChange).catch(ignore); };
+
+  /* --------------------------------------------------------------- export */
+
+  function refreshExportPresets() {
+    var sel = $('export-preset');
+    sel.innerHTML = '';
+    $('export-run').disabled = true;
+    if (!state.session) return Promise.resolve();
+    return call('export.presets').then(function (r) {
+      if (!r.ok) { message(r.error); return; }
+      r.presets.forEach(function (p) {
+        var option = el('option', '', p.name);
+        option.value = p.id;
+        if (p.id === r.default) option.selected = true;
+        sel.appendChild(option);
+      });
+      $('export-run').disabled = !r.presets.length;
+      if (!r.presets.length) message('no export presets were found');
+    });
+  }
+
+  function formatBytes(n) {
+    if (n > 1048576) return (n / 1048576).toFixed(1) + ' MB';
+    if (n > 1024) return Math.round(n / 1024) + ' kB';
+    return n + ' B';
+  }
+
+  function showExportFiles(r) {
+    var ul = $('export-files');
+    ul.innerHTML = '';
+    r.files.forEach(function (f) {
+      var li = el('li');
+      var label = el('span', '', f.name);
+      label.title = f.path;
+      li.appendChild(label);
+      li.appendChild(el('small', '', formatBytes(f.bytes)));
+      if (window.ArdourBridge.canSaveFiles()) {
+        var save = el('button', '', 'Save to…');
+        save.onclick = function () {
+          save.disabled = true;
+          window.ArdourBridge.saveFile(f.path, f.name).then(function (where) {
+            save.disabled = false;
+            message(where ? 'saved to ' + where : 'not saved');
+          });
+        };
+        li.appendChild(save);
+      }
+      ul.appendChild(li);
+    });
+  }
+
+  $('export-form').onsubmit = function (e) {
+    e.preventDefault();
+    if (!state.session) return;
+    $('export-files').innerHTML = '';
+    $('export-run').disabled = true;
+    message('exporting…');
+    call('export.audio', { preset: $('export-preset').value }).then(checked).then(function (r) {
+      message('exported ' + r.seconds.toFixed(1) + ' s into ' + r.folder);
+      showExportFiles(r);
+    }).catch(ignore).then(function () { $('export-run').disabled = false; });
+  };
 
   /* ------------------------------------------------------------- transport */
 
@@ -1426,7 +1490,8 @@
         ' params=' + document.querySelectorAll('.plugin-params input').length +
         ' fx=' + document.querySelectorAll('.strip-plugins button:not(.add-fx)').length +
         ' autopoints=' + document.querySelectorAll('.auto-point').length +
-        ' keys=' + document.querySelectorAll('#keyboard:not([hidden]) .kb-key').length;
+        ' keys=' + document.querySelectorAll('#keyboard:not([hidden]) .kb-key').length +
+        ' exported=' + document.querySelectorAll('#export-files li').length;
     }
   };
 
@@ -1436,6 +1501,7 @@
       if (!st.ok) return;
       refreshSessions();
       if (state.session) { showView('editor'); refreshAll(); }
+      refreshExportPresets();
       setInterval(pollLoop, 100);
     });
   }
