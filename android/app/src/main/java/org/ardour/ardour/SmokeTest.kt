@@ -384,8 +384,15 @@ object SmokeTest {
         val reply = call(host, "export.audio", params)
         val files = reply.getJSONArray("files")
         if (files.length() == 0) fail("the export wrote no file: $reply")
-        val file = File(files.getJSONObject(0).getString("path"))
-        if (!file.isFile) fail("the exported file is not there: $file")
+        /* the CD preset writes a WAV, but a preset may write several files
+         * (cue sheets, several formats), so pick the audio one */
+        var file: File? = null
+        for (i in 0 until files.length()) {
+            val f = File(files.getJSONObject(i).getString("path"))
+            if (f.name.endsWith(".wav", ignoreCase = true)) { file = f; break }
+            if (file == null || f.length() > file.length()) file = f
+        }
+        if (file == null || !file.isFile) fail("the exported file is not there: $reply")
 
         /* walk the RIFF chunks rather than assuming a 44 byte header */
         val bytes = file.readBytes()
