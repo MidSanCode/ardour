@@ -1,6 +1,7 @@
 package org.ardour.ardour
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Bundle
@@ -13,6 +14,7 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.ContextCompat
 import org.json.JSONObject
 import java.io.File
 
@@ -102,6 +104,11 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        /* the engine runs under a foreground service so that it survives the
+         * screen going off and the user switching away; the service also owns
+         * the audio focus */
+        ContextCompat.startForegroundService(this, Intent(this, ArdourService::class.java))
+
         val host = (application as ArdourApplication).engine
         host.start()
         (application as ArdourApplication).midi
@@ -146,6 +153,12 @@ class MainActivity : AppCompatActivity() {
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED &&
             intent?.getBooleanExtra("smoketest", false) != true) {
             requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), 1)
+        }
+
+        if (android.os.Build.VERSION.SDK_INT >= 33 &&
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED &&
+            intent?.getBooleanExtra("smoketest", false) != true) {
+            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 2)
         }
 
         if (intent?.getBooleanExtra("smoketest", false) == true) {

@@ -1317,6 +1317,21 @@ jobs:
             grep 'ARDOUR_EXPORT' logcat.txt
             grep -E 'ARDOUR_EXPORT file=.*\.wav bytes=[1-9][0-9]* rate=44100 channels=2 bits=16 seconds=2\.0[0-9]* peak=(0\.[0-9]*[1-9]|1\.000)' logcat.txt
 
+            # --- the foreground service ------------------------------------------
+            # The engine runs under a mediaPlayback foreground service; without
+            # one Android may kill the process while the screen is off, which for
+            # a DAW means losing a take.  Assert that it is really a *foreground*
+            # service, not merely a started one, and that the process is still
+            # there after going to the background.
+            adb shell dumpsys activity services org.ardour.ardour > services.txt
+            grep -q 'org.ardour.ardour/.ArdourService' services.txt
+            grep -q 'isForeground=true' services.txt
+            grep -q 'ARDOUR_SERVICE foreground' logcat.txt
+            adb shell input keyevent KEYCODE_HOME
+            sleep 5
+            test -n "$(adb shell pidof org.ardour.ardour)"
+            echo 'still alive in the background after 5 s'
+
       - name: Upload the log
         if: always()
         uses: actions/upload-artifact@v4

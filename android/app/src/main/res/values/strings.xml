@@ -2,4 +2,6 @@
 <resources>
     <string name="app_name">Ardour</string>
     <string name="engine_missing">The Ardour engine library is not present in this build.</string>
+    <string name="notification_channel">Engine</string>
+    <string name="notification_engine">The engine is running</string>
 </resources>
