@@ -19,6 +19,7 @@
   <button id="stop" disabled>&#9632;</button>
   <button id="record" disabled title="Arm the session for recording">&#9679;</button>
   <span id="clock">00:00:00.000</span>
+  <span id="bbt" class="badge">1|1</span>
 </div>
 
 <nav id="tabs">
@@ -79,11 +80,26 @@
     <button id="zoom-out" title="Zoom out">&minus;</button>
     <button id="zoom-in" title="Zoom in">+</button>
   </div>
+  <div class="bar wrap" id="musical-bar">
+    <label class="field" title="Tempo, in beats per minute">&#9833;
+      <input id="bpm" type="number" min="20" max="300" step="0.1" value="120">
+    </label>
+    <label class="field" title="Time signature">
+      <select id="meter-beats"></select><span class="slash">/</span><select id="meter-unit"></select>
+    </label>
+    <button id="click" title="Metronome">Click</button>
+    <button id="loop-toggle" title="Play the marked range over and over">Loop</button>
+    <button id="loop-from-region" title="Make the selected region the loop">Loop sel</button>
+    <button id="loop-clear" title="Remove the loop">No loop</button>
+    <button id="add-mark" title="Put a marker at the playhead">+ Mark</button>
+    <button id="del-mark" disabled title="Delete the selected marker">&#10005; Mark</button>
+  </div>
   <div id="timeline">
     <div id="track-heads"></div>
     <div id="lanes-scroll">
       <div id="lanes">
         <div id="ruler"></div>
+        <div id="loop-range" hidden></div>
         <div id="lane-rows"></div>
         <div id="playhead"></div>
       </div>

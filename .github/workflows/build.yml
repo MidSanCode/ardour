@@ -1282,7 +1282,7 @@ jobs:
             adb logcat -d > logcat.txt
             grep -E 'ArdourSmoke|ArdourUI|ArdourEngine|ardour' logcat.txt | tail -120
             grep -q 'ARDOUR_SMOKE PASS' logcat.txt
-            grep -E 'ARDOUR_UI editor .*lanes=3 regions=[1-9]' logcat.txt
+            grep -E 'ARDOUR_UI editor .*lanes=3 regions=[1-9].* bars=[1-9][0-9]* beats=[1-9]' logcat.txt
             grep -E 'ARDOUR_UI mixer .*strips=5.* fx=[2-9]' logcat.txt
             grep -E 'ARDOUR_UI roll .*overlay=roll notes=[1-9]' logcat.txt
             grep -E 'ARDOUR_UI plugin .*overlay=plugin .*params=[1-9]' logcat.txt
@@ -1316,6 +1316,17 @@ jobs:
             echo "--- ARDOUR_EXPORT line ---"
             grep 'ARDOUR_EXPORT' logcat.txt
             grep -E 'ARDOUR_EXPORT file=.*\.wav bytes=[1-9][0-9]* rate=44100 channels=2 bits=16 seconds=2\.0[0-9]* peak=(0\.[0-9]*[1-9]|1\.000)' logcat.txt
+
+            # --- the musical timeline ---------------------------------------------
+            # The smoke test changes the tempo to 96 and the meter to 3/4, asks
+            # for the bar grid and checks that a bar is three quarter notes long
+            # at that tempo (1.875 s), then starts the metronome, adds, moves and
+            # removes a marker, and loops a range.  The ruler the frontend draws
+            # comes from that same grid, so the editor line is checked for bars
+            # and beats as well.
+            echo "--- ARDOUR_MUSICAL line ---"
+            grep 'ARDOUR_MUSICAL' logcat.txt
+            grep -E 'ARDOUR_MUSICAL bpm=96 meter=3/4 bars=[1-9][0-9]* barlen=[1-9][0-9]* beats=[1-9]' logcat.txt
 
             # --- the foreground service ------------------------------------------
             # The engine runs under a mediaPlayback foreground service; without

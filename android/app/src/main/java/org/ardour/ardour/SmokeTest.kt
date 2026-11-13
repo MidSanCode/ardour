@@ -441,6 +441,80 @@ object SmokeTest {
                    "peak=${"%.3f".format(peak / 32767.0)}")
     }
 
+    /**
+     * The musical timeline: tempo, meter, the metronome, markers and the loop.
+     *
+     * The bar grid is the part worth checking: it is what the ruler draws, and
+     * it has to agree with the tempo map rather than with the seconds.  Three
+     * quarter notes at 96 bpm are 1.875 s per bar whatever the sample rate is,
+     * and the engine is the only thing that knows it.
+     */
+    private fun checkMusical(host: EngineHost, rate: Long) {
+        val start = call(host, "tempo.get")
+        if (start.getDouble("bpm") <= 0) fail("the session has no tempo")
+        if (start.getInt("beats_per_bar") <= 0) fail("the session has no meter")
+
+        var m = call(host, "tempo.set", JSONObject().put("bpm", 96))
+        if (!near(m.getDouble("bpm"), 96.0, 0.01)) fail("the tempo did not change: $m")
+        m = call(host, "meter.set", JSONObject().put("beats", 3).put("unit", 4))
+        if (m.getInt("beats_per_bar") != 3 || m.getInt("beat_unit") != 4) fail("the meter did not change: $m")
+
+        val range = JSONObject().put("from", 0).put("to", 8 * rate)
+        val bars = call(host, "grid", range).getJSONArray("bars")
+        if (bars.length() < 4) fail("the bar grid is empty: $bars")
+        val barLength = bars.getJSONObject(1).getLong("at") - bars.getJSONObject(0).getLong("at")
+        val expected = 3.0 * 60.0 / 96.0 * rate
+        if (!near(barLength.toDouble(), expected, rate * 0.002)) {
+            fail("a bar is $barLength samples, expected $expected")
+        }
+        val beats = call(host, "grid", range).getJSONArray("beats")
+        if (beats.length() < 2) fail("the beat grid is empty: $beats")
+
+        if (!call(host, "click.set", JSONObject().put("enabled", true)).getBoolean("click")) {
+            fail("the metronome did not start")
+        }
+        call(host, "click.set", JSONObject().put("enabled", false))
+
+        val marker = call(host, "marker.add", JSONObject().put("position", 2 * rate).put("name", "Chorus"))
+            .getJSONObject("marker")
+        if (call(host, "markers.list").getJSONArray("markers").length() != 1) fail("the marker was not added")
+        call(host, "marker.move", JSONObject().put("id", marker.getString("id")).put("position", 3 * rate))
+        val marks = call(host, "markers.list").getJSONArray("markers")
+        if (marks.getJSONObject(0).getLong("position") != 3 * rate) fail("the marker did not move: $marks")
+
+        val loop = call(host, "loop.set", JSONObject().put("start", rate).put("end", 3 * rate).put("enabled", true))
+            .getJSONObject("loop")
+        if (loop.getLong("start") != rate || loop.getLong("end") != 3 * rate) fail("the loop has the wrong range: $loop")
+
+        /* turning the loop on is a transport request, so it is answered by the
+         * process thread a cycle or two later; and because Ardour treats the
+         * loop as a mode, saying yes also starts the transport */
+        var looped = false
+        for (i in 0 until 30) {
+            val t = call(host, "transport.state")
+            if (t.optBoolean("loop")) {
+                looped = true
+                break
+            }
+            Thread.sleep(100)
+        }
+        if (!looped) fail("the transport did not start looping")
+
+        if (!call(host, "loop.clear").isNull("loop")) fail("the loop was not cleared")
+        call(host, "transport.stop")
+        Thread.sleep(200)
+
+        call(host, "marker.remove", JSONObject().put("id", marker.getString("id")))
+        if (call(host, "markers.list").getJSONArray("markers").length() != 0) fail("the marker was not removed")
+
+        Log.i(TAG, "ARDOUR_MUSICAL bpm=96 meter=3/4 bars=${bars.length()} barlen=$barLength " +
+            "beats=${beats.length()} marks=1 loop=1")
+
+        /* back to what the session started with, so nothing below sees this */
+        call(host, "tempo.set", JSONObject().put("bpm", 120))
+        call(host, "meter.set", JSONObject().put("beats", 4).put("unit", 4))
+    }
+
     private fun checkEditing(host: EngineHost, scratch: File) {
         val rate = call(host, "engine.status").optLong("sample_rate", 48000L)
 
@@ -496,6 +570,7 @@ object SmokeTest {
         checkImportAndHistory(host, scratch, rate, vocals)
         checkMidiAndPlugins(host, rate, guitar)
         checkAutomation(host, rate, guitar)
+        checkMusical(host, rate)
         checkExport(host, scratch, rate)
 
         /* material for the frontend, and a signal for the meters */

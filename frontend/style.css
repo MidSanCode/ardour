@@ -19,6 +19,20 @@ input:not([type=range]) { flex: 1; min-width: 5em; width: 5em; }
 button:disabled { opacity: .4; }
 button.rolling { background: #2f4a31; border-color: var(--accent); }
 #clock { font-family: ui-monospace, monospace; font-size: 18px; margin-left: auto; }
+#bbt { font-family: ui-monospace, monospace; font-size: 14px; color: var(--fg); }
+#musical-bar .field { display: flex; align-items: center; gap: 4px; font-size: 12px; color: var(--dim); }
+#musical-bar input { width: 4.6em; min-width: 4.6em; padding: 5px 6px; text-align: right; }
+#musical-bar select { padding: 5px 4px; }
+#musical-bar .slash { color: var(--dim); }
+#click.on, #loop-toggle.on { background: #2f4a31; border-color: var(--accent); }
+#loop-range { position: absolute; top: 0; bottom: 0; background: rgba(95, 141, 239, .10); border-left: 1px dashed rgba(95,141,239,.5); border-right: 1px dashed rgba(95,141,239,.5); pointer-events: none; z-index: 1; }
+#loop-range.on { background: rgba(95, 141, 239, .18); border-color: rgba(95,141,239,.8); }
+#loop-range[hidden] { display: none; }
+.bar-tick { position: absolute; top: 0; height: 100%; border-left: 1px solid #4a5160; }
+.bar-tick.label { padding-left: 3px; font-size: 11px; color: var(--dim); }
+.beat-tick { position: absolute; top: 60%; height: 40%; border-left: 1px solid #333944; }
+.mark { position: absolute; top: 0; height: 14px; max-width: 76px; padding: 0 4px; font-size: 10px; line-height: 14px; color: #10131a; background: #e0c050; border-radius: 0 3px 3px 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; z-index: 3; }
+.mark.selected { background: #fff3b0; box-shadow: 0 0 0 1px #fff; }
 #tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); }
 #tabs button { border: none; border-radius: 6px 6px 0 0; background: transparent; color: var(--dim); }
 #tabs button.active { background: var(--panel); color: var(--fg); }

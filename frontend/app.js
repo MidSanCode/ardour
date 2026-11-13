@@ -30,7 +30,11 @@
     overlay: null,    /* what the overlay shows: {kind: 'roll'|'plugin'|'plugins', ...} */
     automation: {},   /* track id -> {control, plugin, param, data}: the automation lanes shown */
     keyboard: false,  /* the on-screen MIDI keyboard */
-    octave: 4
+    octave: 4,
+    musical: null,    /* tempo, meter, click and loop, from tempo.get */
+    markers: [],      /* the session's marks, from markers.list */
+    grid: null,       /* where the bars and beats are, from grid */
+    selectedMarker: null
   };
 
   /* ------------------------------------------------------------------ util */
@@ -131,8 +135,12 @@
     $('export-files').innerHTML = '';
     if (state.session) {
       showView('editor');
-      return Promise.all([refreshSessions(), refreshAll(), refreshExportPresets()]);
+      return Promise.all([refreshSessions(), refreshAll(), refreshExportPresets(), refreshMusical()]);
     }
+    state.musical = null;
+    state.markers = [];
+    state.grid = null;
+    state.selectedMarker = null;
     refreshExportPresets();
     return refreshSessions();
   }
@@ -280,6 +288,7 @@
     state.rolling = t.rolling;
     state.position = t.position;
     $('clock').textContent = formatClock(t.seconds);
+    if (t.bbt) $('bbt').textContent = t.bbt.bar + '|' + t.bbt.beat;
     $('play').classList.toggle('rolling', !!t.rolling);
     $('playhead').style.left = samplesToPx(t.position) + 'px';
     if (t.rolling && state.view === 'editor') {
@@ -305,6 +314,8 @@
       if (ids.indexOf(state.selectedTrack) < 0) state.selectedTrack = ids.length ? ids[0] : null;
       if (state.selectedRegion && !findRegion(state.selectedRegion)) state.selectedRegion = null;
       renderTimeline();
+      /* the ruler needs the bars, which only the tempo map knows about */
+      return refreshGrid();
     });
   }
 
@@ -337,7 +348,34 @@
   function renderRuler(width) {
     var ruler = $('ruler');
     ruler.innerHTML = '';
-    /* a label every 1, 2, 5, 10, 30 or 60 seconds, whichever leaves room */
+
+    var g = state.grid;
+    if (g && g.bars && g.bars.length) {
+      /* Bars and beats come from the tempo map, not from the seconds: once
+       * the tempo or the meter changes they are not evenly spaced, and a
+       * ruler that pretends otherwise is worse than no ruler at all. */
+      var spacing = g.bars.length > 1 ? samplesToPx(g.bars[1].at) - samplesToPx(g.bars[0].at) : 100;
+      var every = Math.max(1, Math.ceil(34 / Math.max(1, spacing)));
+
+      g.beats.forEach(function (at) {
+        var beat = el('span', 'beat-tick');
+        beat.style.left = samplesToPx(at) + 'px';
+        ruler.appendChild(beat);
+      });
+      g.bars.forEach(function (b) {
+        var tick = el('span', 'bar-tick');
+        tick.style.left = samplesToPx(b.at) + 'px';
+        if ((b.bar - 1) % every === 0) {
+          tick.className = 'bar-tick label';
+          tick.textContent = b.bar;
+        }
+        ruler.appendChild(tick);
+      });
+      renderMarkers();
+      return;
+    }
+
+    /* no session, or a map the engine could not describe: fall back to time */
     var steps = [1, 2, 5, 10, 30, 60, 120, 300];
     var step = steps[steps.length - 1];
     for (var i = 0; i < steps.length; i++) {
@@ -349,6 +387,7 @@
       tick.style.left = s * state.pxPerSec + 'px';
       ruler.appendChild(tick);
     }
+    renderMarkers();
   }
 
   function renderTimeline() {
@@ -1437,6 +1476,140 @@
     });
   }
 
+  /* ------------------------------------------------------ musical timeline */
+
+  function refreshMusical() {
+    if (!state.session) return Promise.resolve();
+    return call('tempo.get').then(function (r) {
+      if (!r.ok) return;
+      state.musical = r;
+      var bpm = $('bpm');
+      if (document.activeElement !== bpm) bpm.value = (Math.round(r.bpm * 10) / 10).toFixed(1);
+      if (document.activeElement !== $('meter-beats')) $('meter-beats').value = String(r.beats_per_bar);
+      if (document.activeElement !== $('meter-unit')) $('meter-unit').value = String(r.beat_unit);
+      $('click').classList.toggle('on', !!r.click);
+      $('loop-toggle').disabled = !r.loop;
+      $('loop-clear').disabled = !r.loop;
+      $('loop-toggle').classList.toggle('on', !!(r.loop && r.loop.enabled));
+      renderLoopRange();
+      return refreshMarkers();
+    }).catch(ignore);
+  }
+
+  function applyMusical(r) {
+    state.musical = r;
+    return refreshMusical();
+  }
+
+  function refreshGrid() {
+    var tl = state.timeline;
+    if (!state.session || !tl) { state.grid = null; return Promise.resolve(); }
+    var seconds = Math.max(60, tl.end / state.sampleRate + 20);
+    return call('grid', { from: 0, to: Math.ceil(seconds * state.sampleRate), max: 400 }).then(function (r) {
+      state.grid = r && r.ok ? r : null;
+      if (state.timeline) renderTimeline();
+    }).catch(ignore);
+  }
+
+  function renderLoopRange() {
+    var band = $('loop-range');
+    var l = state.musical && state.musical.loop;
+    if (!l) { band.hidden = true; return; }
+    band.hidden = false;
+    band.style.left = samplesToPx(l.start) + 'px';
+    band.style.width = Math.max(2, samplesToPx(l.end) - samplesToPx(l.start)) + 'px';
+    band.classList.toggle('on', !!l.enabled);
+  }
+
+  function refreshMarkers() {
+    if (!state.session) return Promise.resolve();
+    return call('markers.list').then(function (r) {
+      if (!r.ok) return;
+      state.markers = r.markers;
+      var still = state.markers.some(function (m) { return m.id === state.selectedMarker; });
+      if (!still) state.selectedMarker = null;
+      $('del-mark').disabled = !state.selectedMarker;
+      renderMarkers();
+    }).catch(ignore);
+  }
+
+  function renderMarkers() {
+    var ruler = $('ruler');
+    if (!ruler) return;
+    Array.prototype.slice.call(ruler.querySelectorAll('.mark')).forEach(function (n) { n.remove(); });
+    state.markers.forEach(function (m) {
+      var flag = el('span', 'mark' + (m.id === state.selectedMarker ? ' selected' : ''), m.name);
+      flag.style.left = samplesToPx(m.position) + 'px';
+      flag.title = m.name + '  ' + m.bbt.bar + '|' + m.bbt.beat;
+      flag.onclick = function (e) {
+        e.stopPropagation();
+        state.selectedMarker = m.id;
+        $('del-mark').disabled = false;
+        renderMarkers();
+        locate(m.position);
+      };
+      ruler.appendChild(flag);
+    });
+  }
+
+  function setLoop(start, end, enabled) {
+    return call('loop.set', { start: Math.round(start), end: Math.round(end), enabled: enabled })
+      .then(checked).then(applyMusical).catch(ignore);
+  }
+
+  (function () {
+    for (var b = 1; b <= 16; b++) $('meter-beats').appendChild(new Option(String(b), String(b)));
+    [1, 2, 4, 8, 16].forEach(function (u) { $('meter-unit').appendChild(new Option(String(u), String(u))); });
+    $('meter-beats').value = '4';
+    $('meter-unit').value = '4';
+  })();
+
+  $('bpm').onchange = function () {
+    var v = parseFloat($('bpm').value);
+    if (!(v >= 20 && v <= 300)) { refreshMusical(); return; }
+    call('tempo.set', { bpm: v }).then(checked).then(applyMusical)
+      .then(refreshGrid).catch(ignore);
+  };
+
+  $('meter-beats').onchange = $('meter-unit').onchange = function () {
+    call('meter.set', { beats: Number($('meter-beats').value), unit: Number($('meter-unit').value) })
+      .then(checked).then(applyMusical).then(refreshGrid).catch(ignore);
+  };
+
+  $('click').onclick = function () {
+    call('click.set', { enabled: !(state.musical && state.musical.click) })
+      .then(checked).then(applyMusical).catch(ignore);
+  };
+
+  $('loop-toggle').onclick = function () {
+    var l = state.musical && state.musical.loop;
+    if (!l) return;
+    setLoop(l.start, l.end, !l.enabled);
+  };
+
+  $('loop-from-region').onclick = function () {
+    var found = state.selectedRegion ? findRegion(state.selectedRegion) : null;
+    if (!found) { message('select a region first'); return; }
+    setLoop(found.region.position, found.region.position + found.region.length, true);
+  };
+
+  $('loop-clear').onclick = function () {
+    call('loop.clear').then(checked).then(applyMusical).catch(ignore);
+  };
+
+  $('add-mark').onclick = function () {
+    call('marker.add', { position: state.position })
+      .then(checked).then(refreshMarkers).catch(ignore);
+  };
+
+  $('del-mark').onclick = function () {
+    if (!state.selectedMarker) return;
+    var id = state.selectedMarker;
+    state.selectedMarker = null;
+    call('marker.remove', { id: id }).then(checked)
+      .then(function () { $('del-mark').disabled = true; return refreshMarkers(); }).catch(ignore);
+  };
+
   /* for hosts and tests: switch views, and describe what is drawn */
   window.ArdourApp = {
     show: function (name) {
@@ -1491,7 +1664,14 @@
         ' fx=' + document.querySelectorAll('.strip-plugins button:not(.add-fx)').length +
         ' autopoints=' + document.querySelectorAll('.auto-point').length +
         ' keys=' + document.querySelectorAll('#keyboard:not([hidden]) .kb-key').length +
-        ' exported=' + document.querySelectorAll('#export-files li').length;
+        ' exported=' + document.querySelectorAll('#export-files li').length +
+        ' bars=' + (state.grid && state.grid.bars ? state.grid.bars.length : 0) +
+        ' beats=' + (state.grid && state.grid.beats ? state.grid.beats.length : 0) +
+        ' marks=' + document.querySelectorAll('#ruler .mark').length +
+        ' bpm=' + (state.musical ? Math.round(state.musical.bpm) : '-') +
+        ' meter=' + (state.musical ? state.musical.beats_per_bar + '/' + state.musical.beat_unit : '-') +
+        ' click=' + (state.musical && state.musical.click ? 1 : 0) +
+        ' loop=' + (state.musical && state.musical.loop ? (state.musical.loop.enabled ? 1 : 0) : '-');
     }
   };
 

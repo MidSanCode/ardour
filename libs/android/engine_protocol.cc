@@ -65,6 +65,7 @@
 #include "ardour/automation_control.h"
 #include "ardour/automation_list.h"
 #include "ardour/io.h"
+#include "ardour/location.h"
 #include "ardour/midi_port.h"
 #include "ardour/midi_model.h"
 #include "ardour/midi_region.h"
@@ -75,6 +76,7 @@
 #include "ardour/plugin_manager.h"
 #include "ardour/playlist.h"
 #include "ardour/presentation_info.h"
+#include "ardour/rc_configuration.h"
 #include "ardour/region_factory.h"
 #include "ardour/route.h"
 #include "ardour/session.h"
@@ -83,6 +85,9 @@
 #include "ardour/track.h"
 #include "ardour/types.h"
 #include "ardour/utils.h"
+
+#include "temporal/bbt_time.h"
+#include "temporal/tempo.h"
 
 #include "engine_protocol.h"
 
@@ -140,6 +145,14 @@ static std::string
 error_reply (std::string const& msg)
 {
 	return "{\"ok\":false,\"error\":" + q (msg) + "}";
+}
+
+static std::string
+bbt_json (Temporal::BBT_Argument const& bbt)
+{
+	return "{\"bar\":" + std::to_string ((long long) bbt.bars) +
+		",\"beat\":" + std::to_string ((long long) bbt.beats) +
+		",\"tick\":" + std::to_string ((long long) bbt.ticks) + "}";
 }
 
 /* The parameters of a request: a flat JSON object whose values are strings,
@@ -648,6 +661,8 @@ transport_json ()
 	j += std::string (",\"recording\":") + (session->actively_recording () ? "true" : "false");
 	j += ",\"position\":" + std::to_string ((long long) pos);
 	j += ",\"seconds\":" + num (sr > 0 ? pos / sr : 0);
+	j += ",\"bbt\":" + bbt_json (Temporal::TempoMap::fetch ()->bbt_at (timepos_t (pos)));
+	j += std::string (",\"loop\":") + (session->get_play_loop () ? "true" : "false");
 	j += "}";
 	return j;
 }
@@ -2538,6 +2553,387 @@ m_export_audio (Params& p)
 	return j;
 }
 
+/* ---------------------------------------------------------------------------
+ * the musical timeline: tempo, meter, the loop, the click and markers
+ *
+ * The editor normally edits all of this through dialogs and its marker bar.
+ * A phone has no dialogs, so the protocol does the edits itself, with the
+ * same bookkeeping the dialogs use: the tempo map and the locations are
+ * Stateful, so a change is recorded as a command over their state and turns
+ * up in the undo history like any other edit.
+ *
+ * Everything here is expressed in samples because that is what the rest of
+ * the protocol speaks; the bar and beat are derived from the tempo map, so
+ * the UI never has to know what the map contains.
+ */
+
+static std::string
+location_json (Location* loc, Temporal::TempoMap::SharedPtr const& map)
+{
+	std::string j = "{\"id\":" + q (loc->id ().to_s ());
+	j += ",\"name\":" + q (loc->name ());
+	j += ",\"position\":" + std::to_string ((long long) loc->start_sample ());
+	j += ",\"end\":" + std::to_string ((long long) loc->end_sample ());
+	j += ",\"bbt\":" + bbt_json (map->bbt_at (timepos_t (loc->start_sample ())));
+	j += std::string (",\"mark\":") + (loc->is_mark () ? "true" : "false");
+	j += std::string (",\"loop\":") + (loc->is_auto_loop () ? "true" : "false");
+	j += "}";
+	return j;
+}
+
+/* what the transport and the timeline need to know about the map: the tempo
+ * and meter in effect at the playhead, where the playhead is musically, and
+ * the loop */
+static std::string
+musical_json ()
+{
+	Temporal::TempoMap::SharedPtr map = Temporal::TempoMap::fetch ();
+	timepos_t const               pos (session->transport_sample ());
+	Temporal::TempoPoint const&   tempo (map->tempo_at (pos));
+	Temporal::MeterPoint const&   meter (map->meter_at (pos));
+	Location*                     loop = session->locations ()->auto_loop_location ();
+
+	std::string j = "{\"ok\":true";
+	j += ",\"bpm\":" + num (tempo.note_types_per_minute ());
+	j += ",\"note_type\":" + std::to_string (tempo.note_type ());
+	j += ",\"beats_per_bar\":" + std::to_string (meter.divisions_per_bar ());
+	j += ",\"beat_unit\":" + std::to_string (meter.note_value ());
+	j += ",\"bbt\":" + bbt_json (map->bbt_at (pos));
+	j += std::string (",\"click\":") + (Config->get_clicking () ? "true" : "false");
+	j += ",\"loop\":";
+	if (loop) {
+		j += "{\"start\":" + std::to_string ((long long) loop->start_sample ());
+		j += ",\"end\":" + std::to_string ((long long) loop->end_sample ());
+		j += std::string (",\"enabled\":") + (session->get_play_loop () ? "true" : "false");
+		j += "}";
+	} else {
+		j += "null";
+	}
+	j += "}";
+	return j;
+}
+
+/* A tempo or meter change goes on a bar line: putting one in the middle of a
+ * bar is legal but nobody means it, and the editor's dialogs work on bars. */
+static Temporal::BBT_Argument
+param_bar (Params& p)
+{
+	Temporal::TempoMap::SharedPtr map = Temporal::TempoMap::fetch ();
+	return map->round_to_bar (map->bbt_at (timepos_t (param_samples (p, "at", 0))));
+}
+
+static std::string
+m_musical ()
+{
+	std::string e = require_session ();
+	if (!e.empty ()) {
+		return e;
+	}
+	return musical_json ();
+}
+
+static std::string
+m_tempo_set (Params& p)
+{
+	std::string e = require_session ();
+	if (!e.empty ()) {
+		return e;
+	}
+	double const bpm = p.count ("bpm") ? atof (p["bpm"].c_str ()) : 0;
+	if (!(bpm >= 20.0 && bpm <= 300.0)) {
+		return error_reply ("the tempo must be between 20 and 300 beats per minute");
+	}
+	int const note_type = p.count ("note_type") ? atoi (p["note_type"].c_str ()) : 4;
+	if (note_type != 1 && note_type != 2 && note_type != 4 && note_type != 8 && note_type != 16) {
+		return error_reply ("the note value must be 1, 2, 4, 8 or 16");
+	}
+
+	Temporal::BBT_Argument const where = param_bar (p);
+
+	Temporal::TempoMap::WritableSharedPtr map = Temporal::TempoMap::write_copy ();
+	Temporal::TempoMap::set (map);
+	XMLNode& before = map->get_state ();
+	map->set_tempo (Temporal::Tempo (bpm, note_type), where);
+	XMLNode& after = map->get_state ();
+	Temporal::TempoMap::update (map);
+	session->add_command (new Temporal::TempoCommand ("tempo", &before, &after));
+
+	return musical_json ();
+}
+
+static std::string
+m_meter_set (Params& p)
+{
+	std::string e = require_session ();
+	if (!e.empty ()) {
+		return e;
+	}
+	int const beats = p.count ("beats") ? atoi (p["beats"].c_str ()) : 0;
+	if (beats < 1 || beats > 16) {
+		return error_reply ("a bar holds between 1 and 16 beats");
+	}
+	int const unit = p.count ("unit") ? atoi (p["unit"].c_str ()) : 4;
+	if (unit != 1 && unit != 2 && unit != 4 && unit != 8 && unit != 16) {
+		return error_reply ("the beat unit must be 1, 2, 4, 8 or 16");
+	}
+
+	Temporal::BBT_Argument const where = param_bar (p);
+
+	Temporal::TempoMap::WritableSharedPtr map = Temporal::TempoMap::write_copy ();
+	Temporal::TempoMap::set (map);
+	XMLNode& before = map->get_state ();
+	map->set_meter (Temporal::Meter ((int8_t) beats, (int8_t) unit), where);
+	XMLNode& after = map->get_state ();
+	Temporal::TempoMap::update (map);
+	session->add_command (new Temporal::TempoCommand ("meter", &before, &after));
+
+	return musical_json ();
+}
+
+/* The loop is the auto-loop location plus the transport's loop flag; the
+ * location is what the editor draws, the flag is what makes it play. */
+static std::string
+m_loop_set (Params& p)
+{
+	std::string e = require_session ();
+	if (!e.empty ()) {
+		return e;
+	}
+	samplepos_t const start = param_samples (p, "start", 0);
+	samplepos_t const end   = param_samples (p, "end", 0);
+	if (end <= start) {
+		return error_reply ("the loop ends before it starts");
+	}
+	bool const on = p.count ("enabled") ? truthy (p["enabled"]) : true;
+
+	Locations* locations = session->locations ();
+	XMLNode&   before    = locations->get_state ();
+
+	Location* loop = locations->auto_loop_location ();
+	if (loop) {
+		loop->set (timepos_t (start), timepos_t (end));
+	} else {
+		loop = new Location (*session, timepos_t (start), timepos_t (end), "Loop", Location::IsAutoLoop);
+		locations->add (loop, true);
+	}
+	session->set_auto_loop_location (loop);
+	session->request_play_loop (on, false);
+
+	XMLNode& after = locations->get_state ();
+	session->add_command (new MementoCommand<Locations> (*locations, &before, &after));
+
+	return musical_json ();
+}
+
+static std::string
+m_loop_clear ()
+{
+	std::string e = require_session ();
+	if (!e.empty ()) {
+		return e;
+	}
+
+	Locations* locations = session->locations ();
+	Location*  loop      = locations->auto_loop_location ();
+	if (!loop) {
+		return musical_json ();
+	}
+
+	XMLNode& before = locations->get_state ();
+	/* remove() drops the play loop and the location's own signal wiring */
+	locations->remove (loop);
+	XMLNode& after = locations->get_state ();
+	session->add_command (new MementoCommand<Locations> (*locations, &before, &after));
+
+	return musical_json ();
+}
+
+/* The click is a configuration flag, not session state: libardour's own
+ * session notices the change and starts or stops generating clicks.  Its
+ * sounds are the ones compiled into the library when no click-sound file is
+ * configured, so there is nothing to ship in the APK. */
+static std::string
+m_click_set (Params& p)
+{
+	std::string e = require_session ();
+	if (!e.empty ()) {
+		return e;
+	}
+	if (!p.count ("enabled")) {
+		return error_reply ("'enabled' is missing");
+	}
+	Config->set_clicking (truthy (p["enabled"]));
+	return musical_json ();
+}
+
+static Location*
+find_mark (std::string const& id)
+{
+	if (id.empty ()) {
+		return 0;
+	}
+	PBD::ID const wanted (id);
+	for (auto const& loc : session->locations ()->list ()) {
+		if (loc->is_mark () && loc->id () == wanted) {
+			return loc;
+		}
+	}
+	return 0;
+}
+
+static std::string
+m_markers_list ()
+{
+	std::string e = require_session ();
+	if (!e.empty ()) {
+		return e;
+	}
+	Temporal::TempoMap::SharedPtr map = Temporal::TempoMap::fetch ();
+
+	std::string j = "{\"ok\":true,\"markers\":[";
+	bool        first = true;
+	for (auto const& loc : session->locations ()->list ()) {
+		if (!loc->is_mark () || loc->is_hidden ()) {
+			continue;
+		}
+		j += first ? "" : ",";
+		j += location_json (loc, map);
+		first = false;
+	}
+	j += "]}";
+	return j;
+}
+
+static std::string
+m_marker_add (Params& p)
+{
+	std::string e = require_session ();
+	if (!e.empty ()) {
+		return e;
+	}
+	samplepos_t const at   = param_samples (p, "position", session->transport_sample ());
+	std::string const name = p["name"].empty () ? std::string ("Marker") : p["name"];
+
+	Locations* locations = session->locations ();
+	XMLNode&   before    = locations->get_state ();
+	Location*  loc       = new Location (*session, timepos_t (at), timepos_t (at), name, Location::IsMark);
+	locations->add (loc, false);
+	XMLNode& after = locations->get_state ();
+	session->add_command (new MementoCommand<Locations> (*locations, &before, &after));
+
+	return "{\"ok\":true,\"marker\":" + location_json (loc, Temporal::TempoMap::fetch ()) + "}";
+}
+
+static std::string
+m_marker_edit (Params& p, bool remove)
+{
+	std::string e = require_session ();
+	if (!e.empty ()) {
+		return e;
+	}
+	Location* loc = find_mark (p["id"]);
+	if (!loc) {
+		return error_reply ("no such marker");
+	}
+
+	Locations* locations = session->locations ();
+
+	if (remove) {
+		XMLNode& before = locations->get_state ();
+		locations->remove (loc);
+		XMLNode& after = locations->get_state ();
+		session->add_command (new MementoCommand<Locations> (*locations, &before, &after));
+		return m_markers_list ();
+	}
+
+	samplepos_t const at = param_samples (p, "position", loc->start_sample ());
+
+	XMLNode& before = loc->get_state ();
+	loc->set (timepos_t (at), timepos_t (at));
+	if (!p["name"].empty ()) {
+		loc->set_name (p["name"]);
+	}
+	XMLNode& after = loc->get_state ();
+	session->add_command (new MementoCommand<Location> (*loc, &before, &after));
+
+	return m_markers_list ();
+}
+
+/* The bar lines of a range, so that the ruler shows bars rather than seconds.
+ * The map is the only thing that knows where they are: they are not evenly
+ * spaced once the tempo changes, and they are not even evenly spaced within a
+ * bar once the meter changes, so both are computed here. */
+static std::string
+m_grid (Params& p)
+{
+	std::string e = require_session ();
+	if (!e.empty ()) {
+		return e;
+	}
+	samplepos_t const from = param_samples (p, "from", 0);
+	samplepos_t const to   = param_samples (p, "to", 0);
+	if (to <= from) {
+		return error_reply ("the range is empty");
+	}
+	uint32_t const max = p.count ("max") ? (uint32_t) std::max (1, atoi (p["max"].c_str ())) : 512;
+
+	Temporal::TempoMap::SharedPtr map = Temporal::TempoMap::fetch ();
+
+	struct Bar { samplepos_t at; int32_t bar; int beats; };
+	std::vector<Bar> bars;
+
+	int32_t const first = map->bbt_at (timepos_t (from)).bars;
+	for (int32_t bar = first; bars.size () < max; ++bar) {
+		samplepos_t const at = map->sample_at (Temporal::BBT_Argument (0, bar, 1, 0));
+		if (at > to) {
+			break;
+		}
+		if (!bars.empty () && at <= bars.back ().at) {
+			/* a bar with no length would loop for ever */
+			break;
+		}
+		Bar b;
+		b.at    = at;
+		b.bar   = bar;
+		b.beats = map->meter_at (timepos_t (at)).divisions_per_bar ();
+		bars.push_back (b);
+	}
+
+	/* beats are only worth sending when there is room for them */
+	bool const with_beats = !bars.empty () && (bars.size () * (size_t) bars.front ().beats <= max);
+
+	std::string jb = "[", jt = "[";
+	for (size_t i = 0; i < bars.size (); ++i) {
+		if (i) {
+			jb += ",";
+		}
+		jb += "{\"at\":" + std::to_string ((long long) bars[i].at) +
+			",\"bar\":" + std::to_string ((long long) bars[i].bar) + "}";
+		if (!with_beats) {
+			continue;
+		}
+		for (int beat = 1; beat < bars[i].beats; ++beat) {
+			samplepos_t const at = map->sample_at (Temporal::BBT_Argument (0, bars[i].bar, beat + 1, 0));
+			if (at >= to) {
+				break;
+			}
+			jt += (jt.size () > 1 ? "," : "");
+			jt += std::to_string ((long long) at);
+		}
+	}
+	jb += "]";
+	jt += "]";
+
+	std::string j = "{\"ok\":true";
+	j += ",\"from\":" + std::to_string ((long long) from);
+	j += ",\"to\":" + std::to_string ((long long) to);
+	j += ",\"beats_per_bar\":" + std::to_string (bars.empty () ? 4 : bars.front ().beats);
+	j += ",\"bars\":" + jb;
+	j += ",\"beats\":" + jt;
+	j += "}";
+	return j;
+}
+
 static std::string
 dispatch (std::string const& method, Params& p)
 {
@@ -2597,6 +2993,17 @@ dispatch (std::string const& method, Params& p)
 	if (method == "transport.locate") return m_transport_locate (p);
 	if (method == "export.presets")  return m_export_presets ();
 	if (method == "export.audio")    return m_export_audio (p);
+	if (method == "tempo.get")       return m_musical ();
+	if (method == "tempo.set")       return m_tempo_set (p);
+	if (method == "meter.set")       return m_meter_set (p);
+	if (method == "loop.set")        return m_loop_set (p);
+	if (method == "loop.clear")      return m_loop_clear ();
+	if (method == "click.set")       return m_click_set (p);
+	if (method == "markers.list")    return m_markers_list ();
+	if (method == "marker.add")      return m_marker_add (p);
+	if (method == "marker.move")     return m_marker_edit (p, false);
+	if (method == "marker.remove")   return m_marker_edit (p, true);
+	if (method == "grid")            return m_grid (p);
 	return error_reply ("unknown method '" + method + "'");
 }
 
