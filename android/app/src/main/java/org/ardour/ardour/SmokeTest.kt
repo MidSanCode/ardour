@@ -743,12 +743,61 @@ object SmokeTest {
         return reply
     }
 
+    /**
+     * The block size.  The engine has to report the sizes its backend offers,
+     * take a new one by stopping and starting itself, and come back with the
+     * old one when asked.  A backend that cannot resize is not a failure - the
+     * dummy fallback on an emulator has nothing to resize - but the engine has
+     * to survive the attempt either way.
+     */
+    private fun checkBufferSize(host: EngineHost) {
+        val before = call(host, "engine.buffer")
+        val sizes = before.getJSONArray("sizes")
+        val current = before.getInt("samples")
+        val backend = call(host, "engine.status").optString("backend")
+
+        var other = 0
+        for (i in 0 until sizes.length()) {
+            val n = sizes.getInt(i)
+            if (n != current) {
+                other = n
+                break
+            }
+        }
+        if (sizes.length() == 0 || other == 0) {
+            Log.i(TAG, "ARDOUR_BUFFER skipped backend=\"$backend\" sizes=$sizes")
+            return
+        }
+
+        val changed = JSONObject(host.call("engine.buffer", JSONObject().put("samples", other).toString()))
+        if (!changed.optBoolean("ok", false)) {
+            /* a backend that cannot resize says so; what matters is that the
+             * engine is still there afterwards */
+            if (!call(host, "engine.status").optBoolean("running")) {
+                fail("the engine stopped after a refused block size: ${changed.optString("error")}")
+            }
+            Log.i(TAG, "ARDOUR_BUFFER skipped backend=\"$backend\" reason=${changed.optString("error")}")
+            return
+        }
+        if (changed.optInt("buffer_size", -1) != other) {
+            fail("the block size did not become $other: $changed")
+        }
+
+        val back = call(host, "engine.buffer", JSONObject().put("samples", current))
+        if (back.optInt("buffer_size", -1) != current) {
+            fail("the block size did not go back to $current: $back")
+        }
+        Log.i(TAG, "ARDOUR_BUFFER samples=$current -> $other -> $current backend=\"$backend\"")
+    }
+
     private fun check(host: EngineHost) {
         host.start().get()
 
         val status = call(host, "engine.status")
         if (!status.optBoolean("running")) throw IllegalStateException("the engine is not running")
         Log.i(TAG, "backend ${status.optString("backend")} at ${status.optInt("sample_rate")} Hz")
+
+        checkBufferSize(host)
 
         val name = "smoke-" + System.currentTimeMillis()
         call(host, "session.create", JSONObject().put("name", name))

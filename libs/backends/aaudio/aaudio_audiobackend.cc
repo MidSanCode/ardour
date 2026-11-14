@@ -755,6 +755,15 @@ AAudioBackend::_start (bool /*for_latency_measurement*/)
 		return AudioDeviceOpenError;
 	}
 
+	/* What the stream really got, next to what the engine asked for: the
+	 * burst is the device's own granularity and the capacity is the room it
+	 * gave us for late blocks.  A capacity smaller than two blocks is worth
+	 * knowing about, because it is what an underrun looks like later. */
+	PBD::info << "AAudioBackend: block " << _samples_per_period
+		  << ", device burst " << aa_device_get_frames_per_burst (_output_device)
+		  << ", stream capacity " << aa_device_get_buffer_capacity (_output_device)
+		  << endmsg;
+
 	if (_input_device && aa_device_start (_input_device) != AAUDIO_DEVICE_OK) {
 		PBD::warning << _("AAudioBackend: could not start the input device: ")
 			     << aa_device_get_last_error (_input_device) << endmsg;

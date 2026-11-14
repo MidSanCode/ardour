@@ -58,7 +58,8 @@ enum {
  * sample_rate and channel_count are a request: the device may pick something
  * else, and aa_device_get_sample_rate()/aa_device_get_channel_count() report
  * what was actually granted.  frames_per_burst of 0 means "let the device
- * decide".
+ * decide"; anything else is taken as the size of one engine block and becomes
+ * the stream's buffer capacity, which is two of them.
  *
  * Returns NULL only when out of memory; a device that cannot be opened is
  * returned as a device object with no stream and an error message.

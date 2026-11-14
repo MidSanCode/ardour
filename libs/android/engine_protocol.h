@@ -21,6 +21,12 @@
  * is a JSON object, {"ok":true, ...} or {"ok":false,"error":"..."}.
  *
  *   engine.status                         engine and session state
+ *   engine.buffer                         the block size and the sizes on offer
+ *   engine.buffer    {samples}            changes it: the engine is stopped,
+ *                                         resized and started again, and the old
+ *                                         size is put back if the device refuses.
+ *                                         AAudio cannot resize an open stream, so
+ *                                         this is the only way to change it.
  *   session.list                          the sessions in <user_dir>/sessions
  *   session.create   {name}               creates and loads a new session
  *   session.open     {name}               loads an existing session

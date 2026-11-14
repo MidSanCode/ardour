@@ -41,6 +41,14 @@
     <button id="close" disabled>Close</button>
   </div>
 
+  <h2>Engine</h2>
+  <div class="row">
+    <label for="buffer-size">Block size</label>
+    <select id="buffer-size" title="Samples per audio cycle. Smaller is lower latency; larger survives a busy phone without dropouts."></select>
+    <span id="buffer-note" class="hint"></span>
+  </div>
+  <p class="hint">Changing the block size restarts the engine for a moment. 1024 samples is about 21 ms at 48 kHz; if the sound crackles while the phone is busy, 2048 gives it twice the room.</p>
+
   <h2>Export</h2>
   <form id="export-form" class="row">
     <select id="export-preset" title="The format and settings to export with"></select>

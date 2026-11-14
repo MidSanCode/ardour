@@ -53,6 +53,7 @@
 
 #include "ardour/amp.h"
 #include "ardour/ardour.h"
+#include "ardour/audio_backend.h"
 #include "ardour/audio_track.h"
 #include "ardour/audioengine.h"
 #include "ardour/audiofilesource.h"
@@ -1315,6 +1316,76 @@ m_send_set (Params& p)
 	}
 
 	return "{\"ok\":true,\"strip\":" + strip_json (src) + "}";
+}
+
+/* ---------------------------------------------------------------------------
+ * the engine's block size
+ *
+ * On a phone the block size is the whole latency/robustness trade: 1024
+ * frames is 21 ms at 48 kHz, which is comfortable to play through but leaves
+ * little room when the system decides to wake half a dozen services at once,
+ * and 2048 is the other side of that.  AAudio cannot change its buffer while
+ * a stream is open, so this stops the engine, sets the size and starts it
+ * again - the same thing the desktop's audio setup does - and puts the old
+ * size back if the device will not run the new one.
+ */
+
+static std::string
+buffer_sizes_json (std::shared_ptr<AudioBackend> const& backend)
+{
+	std::string j = "[";
+	std::vector<uint32_t> sizes = backend->available_buffer_sizes (backend->device_name ());
+	for (size_t i = 0; i < sizes.size (); ++i) {
+		j += (i ? "," : "") + std::to_string (sizes[i]);
+	}
+	return j + "]";
+}
+
+static std::string
+m_engine_buffer (Params& p)
+{
+	if (!initialized) {
+		return error_reply ("the engine is not initialized");
+	}
+	std::shared_ptr<AudioBackend> backend = AudioEngine::instance () ? AudioEngine::instance ()->current_backend () : std::shared_ptr<AudioBackend> ();
+	if (!backend) {
+		return error_reply ("there is no audio backend");
+	}
+
+	if (p["samples"].empty ()) {
+		/* no argument: report the size and what else is on offer */
+		return "{\"ok\":true,\"samples\":" + std::to_string (backend->buffer_size ()) +
+			",\"sizes\":" + buffer_sizes_json (backend) + "}";
+	}
+
+	uint32_t samples = (uint32_t) atoi (p["samples"].c_str ());
+	std::vector<uint32_t> sizes = backend->available_buffer_sizes (backend->device_name ());
+	if (std::find (sizes.begin (), sizes.end (), samples) == sizes.end ()) {
+		return error_reply ("this backend does not offer " + p["samples"] + " samples per cycle");
+	}
+
+	const uint32_t previous = backend->buffer_size ();
+	if (samples == previous) {
+		return status_json ();
+	}
+
+	if (session) {
+		session->request_stop ();
+	}
+	AudioEngine::instance ()->stop ();
+
+	if (AudioEngine::instance ()->set_buffer_size (samples) || AudioEngine::instance ()->start ()) {
+		/* whatever went wrong, the application must not be left without an
+		 * engine: put the size it had back before saying so */
+		AudioEngine::instance ()->set_buffer_size (previous);
+		if (AudioEngine::instance ()->start ()) {
+			return error_reply ("the backend did not restart: the engine is stopped");
+		}
+		return error_reply ("this device cannot run with " + std::to_string (samples) + " samples per cycle");
+	}
+
+	log (LogInfo, "block size " + std::to_string (previous) + " -> " + std::to_string (samples) + " samples");
+	return status_json ();
 }
 
 static std::string
@@ -3395,6 +3466,9 @@ dispatch (std::string const& method, Params& p)
 {
 	if (method == "engine.status") {
 		return status_json ();
+	}
+	if (method == "engine.buffer") {
+		return m_engine_buffer (p);
 	}
 	if (!initialized) {
 		return error_reply ("the engine is not initialized");

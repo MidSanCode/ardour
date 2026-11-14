@@ -72,10 +72,17 @@ aa_device_open_common (int32_t sample_rate, int32_t channel_count, int32_t frame
 	AAudioStreamBuilder_setPerformanceMode (builder, AAUDIO_PERFORMANCE_MODE_LOW_LATENCY);
 	AAudioStreamBuilder_setSharingMode (builder, AAUDIO_SHARING_MODE_SHARED);
 
-	/* The stream is used in blocking mode, so the burst size is chosen by the
-	 * device and reported by AAudioStream_getFramesPerBurst().  The request is
-	 * kept for the API, but it is only a hint. */
-	(void) frames_per_burst;
+	/* The stream is used in blocking mode: the caller hands it one engine
+	 * block at a time, so the stream's buffer has to hold two of them - the
+	 * block being played and the block being filled.  Asking for the capacity
+	 * is the whole point of passing frames_per_burst down here: without it the
+	 * capacity is whatever the device picked (two bursts, a few milliseconds
+	 * at 48 kHz), and one scheduling hiccup the size of an engine block is an
+	 * underrun.  A request of 0 means "let the device decide".
+	 */
+	if (frames_per_burst > 0) {
+		AAudioStreamBuilder_setBufferCapacityInFrames (builder, frames_per_burst * 2);
+	}
 
 	aaudio_result_t result = AAUDIO_OK;
 	AAudioStream* stream = NULL;

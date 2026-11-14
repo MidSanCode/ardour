@@ -99,6 +99,9 @@
     } else if (st.running) {
       badge.textContent = st.backend + ' · ' + st.sample_rate + ' Hz · ' + st.buffer_size;
       badge.className = 'badge ok';
+      /* once, and only when the engine is actually up: the sizes come from
+       * the backend, not from a table in the page */
+      if (!bufferSizes) refreshBuffer();
     } else {
       badge.textContent = 'engine: stopped';
       badge.className = 'badge err';
@@ -129,6 +132,47 @@
       return applyStatus(st);
     });
   }
+
+  /* ------------------------------------------------------------ block size */
+
+  var bufferSizes = null;
+
+  function refreshBuffer() {
+    return call('engine.buffer').then(function (r) {
+      if (!r.ok) return;
+      var sel = $('buffer-size');
+      sel.innerHTML = '';
+      (r.sizes || []).forEach(function (n) {
+        var o = el('option', '', String(n));
+        o.value = n;
+        if (n === r.samples) o.selected = true;
+        sel.appendChild(o);
+      });
+      sel.disabled = !(r.sizes || []).length;
+      bufferSizes = r.sizes || [];
+      bufferNote(r.samples);
+    }).catch(ignore);
+  }
+
+  function bufferNote(samples) {
+    var sr = state.sampleRate || 48000;
+    $('buffer-note').textContent = samples
+      ? samples + ' samples · ' + (samples / sr * 1000).toFixed(1) + ' ms'
+      : '';
+  }
+
+  $('buffer-size').onchange = function () {
+    var want = Number($('buffer-size').value);
+    /* the engine goes down and comes back: no point talking to it meanwhile */
+    $('buffer-size').disabled = true;
+    $('buffer-note').textContent = 'restarting…';
+    call('engine.buffer', { samples: want }).then(checked).then(function (st) {
+      applyStatus(st);
+      return refreshBuffer();
+    }).catch(function () {
+      refreshBuffer();
+    });
+  };
 
   function afterSessionChange(st) {
     applyStatus(st);
