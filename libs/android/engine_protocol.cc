@@ -51,6 +51,7 @@
 #include "pbd/rwlock.h"
 #include "pbd/transmitter.h"
 
+#include "ardour/amp.h"
 #include "ardour/ardour.h"
 #include "ardour/audio_track.h"
 #include "ardour/audioengine.h"
@@ -62,6 +63,7 @@
 #include "ardour/export_status.h"
 #include "ardour/file_source.h"
 #include "ardour/filename_extensions.h"
+#include "ardour/internal_send.h"
 #include "ardour/meter.h"
 #include "ardour/async_midi_port.h"
 #include "ardour/automation_control.h"
@@ -953,6 +955,77 @@ plugin_brief_json (std::shared_ptr<PluginInsert> const& pi)
 	return j;
 }
 
+/* ---------------------------------------------------------------------------
+ * sends
+ */
+
+/* The aux sends on a route, in processor order.  A send sits on one side of
+ * the fader or the other depending on where it was inserted, and the fader is
+ * just a processor in the same list, so "before the amp" is what pre-fader
+ * means.  The monitor and foldback sends are internal business of the route
+ * and never show up here: only Delivery::Aux is an aux send.
+ */
+static std::vector<std::shared_ptr<InternalSend> >
+route_sends (std::shared_ptr<Route> const& r, std::vector<bool>* pre = 0)
+{
+	std::vector<std::shared_ptr<InternalSend> > out;
+	std::shared_ptr<Processor> amp = r->amp ();
+	bool seen_fader = false;
+
+	for (uint32_t n = 0;; ++n) {
+		std::shared_ptr<Processor> proc = r->nth_processor (n);
+		if (!proc) {
+			break;
+		}
+		if (proc == amp) {
+			seen_fader = true;
+			continue;
+		}
+		std::shared_ptr<InternalSend> s = std::dynamic_pointer_cast<InternalSend> (proc);
+		if (!s || s->role () != Delivery::Aux) {
+			continue;
+		}
+		out.push_back (s);
+		if (pre) {
+			pre->push_back (!seen_fader);
+		}
+	}
+
+	return out;
+}
+
+static std::string
+sends_json (std::shared_ptr<Route> const& r)
+{
+	std::vector<bool> pre;
+	std::vector<std::shared_ptr<InternalSend> > sends = route_sends (r, &pre);
+
+	std::string j = "[";
+	for (size_t i = 0; i < sends.size (); ++i) {
+		std::shared_ptr<InternalSend>     s = sends[i];
+		std::shared_ptr<Route>            target = s->target_route ();
+		std::shared_ptr<AutomationControl> gain = s->gain_control ();
+
+		j += (i ? "," : "");
+		j += "{\"target\":" + q (target ? target->id ().to_s () : std::string ());
+		j += ",\"name\":" + q (target ? target->name () : s->display_name ());
+		j += ",\"gain_db\":" + num (gain ? accurate_coefficient_to_dB (gain->get_value ()) : 0);
+		j += std::string (",\"pre\":") + (pre[i] ? "true" : "false");
+		j += std::string (",\"active\":") + (s->enabled () ? "true" : "false");
+		j += "}";
+	}
+	j += "]";
+
+	return j;
+}
+
+/* the same range the fader uses: silence below -60 dB, at most +6 dB */
+static double
+fader_coefficient (double db)
+{
+	return db <= -60 ? 0 : dB_to_coefficient (std::min (db, 6.0));
+}
+
 static std::string
 strip_json (std::shared_ptr<Route> const& r)
 {
@@ -981,7 +1054,7 @@ strip_json (std::shared_ptr<Route> const& r)
 		j += (first ? "" : ",") + plugin_brief_json (pi);
 		first = false;
 	}
-	j += "]}";
+	j += "],\"sends\":" + sends_json (r) + "}";
 	return j;
 }
 
@@ -1036,9 +1109,7 @@ m_strip_set (Params& p)
 	}
 	if (p.count ("gain_db")) {
 		double db = atof (p["gain_db"].c_str ());
-		/* the fader's range: silence below -60 dB, at most +6 dB */
-		double coeff = db <= -60 ? 0 : dB_to_coefficient (std::min (db, 6.0));
-		set_control (r->gain_control (), coeff);
+		set_control (r->gain_control (), fader_coefficient (db));
 	}
 	if (p.count ("pan")) {
 		if (!r->pan_azimuth_control ()) {
@@ -1100,6 +1171,146 @@ m_routes_remove (Params& p)
 	}
 	session->remove_route (r);
 	return "{\"ok\":true}";
+}
+
+/* ---------------------------------------------------------------------------
+ * sends
+ *
+ * A send feeds one route's output into another route's input, before or after
+ * the source's fader.  Adding one also gives the destination an internal
+ * return, which is what makes it a bus in the mixer's eyes: without a return
+ * there is nothing for the send to land in.
+ */
+
+static std::string
+send_error (std::shared_ptr<Route> const& src, std::shared_ptr<Route> const& dest)
+{
+	if (src == dest) {
+		return error_reply ("a strip cannot send to itself");
+	}
+	if (src->is_singleton () || dest->is_singleton ()) {
+		return error_reply ("the master and monitor buses cannot take part in a send");
+	}
+	return std::string ();
+}
+
+static std::string
+m_send_add (Params& p)
+{
+	std::string e = require_session ();
+	if (!e.empty ()) {
+		return e;
+	}
+	std::shared_ptr<Route> src = find_route (p["track"]);
+	if (!src) {
+		return error_reply ("no such track or bus");
+	}
+	std::shared_ptr<Route> dest = find_route (p["target"]);
+	if (!dest) {
+		return error_reply ("no such bus to send to");
+	}
+	e = send_error (src, dest);
+	if (!e.empty ()) {
+		return e;
+	}
+	if (src->internal_send_for (dest)) {
+		return error_reply ("that send already exists");
+	}
+
+	bool pre = p.count ("pre") ? truthy (p["pre"]) : false;
+	session->add_internal_send (dest, src->before_processor_for_placement (pre ? PreFader : PostFader), src);
+
+	std::shared_ptr<Send> s = src->internal_send_for (dest);
+	if (!s) {
+		return error_reply ("the send could not be created");
+	}
+	if (p.count ("gain_db")) {
+		set_control (s->gain_control (), fader_coefficient (atof (p["gain_db"].c_str ())));
+	}
+
+	return "{\"ok\":true,\"strip\":" + strip_json (src) + "}";
+}
+
+static std::string
+m_send_remove (Params& p)
+{
+	std::string e = require_session ();
+	if (!e.empty ()) {
+		return e;
+	}
+	std::shared_ptr<Route> src = find_route (p["track"]);
+	if (!src) {
+		return error_reply ("no such track or bus");
+	}
+	std::shared_ptr<Route> dest = find_route (p["target"]);
+	if (!dest) {
+		return error_reply ("no such bus");
+	}
+
+	std::shared_ptr<Send> s = src->internal_send_for (dest);
+	if (!s) {
+		return error_reply ("there is no such send");
+	}
+	src->remove_processor (s);
+
+	return "{\"ok\":true,\"strip\":" + strip_json (src) + "}";
+}
+
+static std::string
+m_send_set (Params& p)
+{
+	std::string e = require_session ();
+	if (!e.empty ()) {
+		return e;
+	}
+	std::shared_ptr<Route> src = find_route (p["track"]);
+	if (!src) {
+		return error_reply ("no such track or bus");
+	}
+	std::shared_ptr<Route> dest = find_route (p["target"]);
+	if (!dest) {
+		return error_reply ("no such bus");
+	}
+
+	std::shared_ptr<Send> s = src->internal_send_for (dest);
+	if (!s) {
+		return error_reply ("there is no such send");
+	}
+
+	/* Pre/post is a position in the processor chain, not a property of the
+	 * send, so moving it means taking it out and putting it back on the other
+	 * side of the fader.  Carry the gain across by hand.
+	 */
+	if (p.count ("pre")) {
+		std::vector<bool> pre;
+		std::vector<std::shared_ptr<InternalSend> > sends = route_sends (src, &pre);
+		bool want = truthy (p["pre"]);
+		for (size_t i = 0; i < sends.size (); ++i) {
+			if (sends[i]->target_route () != dest) {
+				continue;
+			}
+			if (pre[i] != want) {
+				double gain = s->gain_control () ? s->gain_control ()->get_value () : 0;
+				src->remove_processor (s);
+				session->add_internal_send (dest, src->before_processor_for_placement (want ? PreFader : PostFader), src);
+				s = src->internal_send_for (dest);
+				if (!s) {
+					return error_reply ("the send could not be moved");
+				}
+				set_control (s->gain_control (), gain);
+			}
+			break;
+		}
+	}
+
+	if (p.count ("gain_db")) {
+		set_control (s->gain_control (), fader_coefficient (atof (p["gain_db"].c_str ())));
+	}
+	if (p.count ("active")) {
+		s->enable (truthy (p["active"]));
+	}
+
+	return "{\"ok\":true,\"strip\":" + strip_json (src) + "}";
 }
 
 static std::string
@@ -3199,6 +3410,9 @@ dispatch (std::string const& method, Params& p)
 	if (method == "buses.add")       return m_buses_add (p);
 	if (method == "mixer.strips")    return m_mixer_strips ();
 	if (method == "strip.set")       return m_strip_set (p);
+	if (method == "send.add")        return m_send_add (p);
+	if (method == "send.remove")     return m_send_remove (p);
+	if (method == "send.set")        return m_send_set (p);
 	if (method == "timeline")        return m_timeline ();
 	if (method == "regions.tone")    return m_regions_tone (p);
 	if (method == "region.move")     return m_region_move (p);

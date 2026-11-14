@@ -35,9 +35,23 @@
  *   meters                                peak level in dBFS per strip and channel
  *
  *   mixer.strips                          tracks, busses and the master bus: gain_db,
- *                                         pan (-1 .. 1 or null), mute, solo, rec
+ *                                         pan (-1 .. 1 or null), mute, solo, rec,
+ *                                         plugins, and sends (target, name, gain_db,
+ *                                         pre, active)
  *   strip.set        {id, gain_db?, pan?, mute?, solo?, rec?, name?}
  *   buses.add        {name}               adds a stereo audio bus
+ *
+ *   send.add         {track, target, pre?, gain_db?}
+ *                                         feeds track's output into target's input;
+ *                                         pre is pre-fader (default post-fader).
+ *                                         The target gains an internal return, so it
+ *                                         starts showing up as a bus.
+ *   send.set         {track, target, gain_db?, pre?, active?}
+ *                                         pre moves the send to the other side of the
+ *                                         fader (it is a chain position, so it is
+ *                                         re-inserted and keeps its gain)
+ *   send.remove      {track, target}
+ *                                         all three reply with the updated strip
  *
  *   timeline                              every track with its regions (samples)
  *   regions.tone     {track, position?, seconds?, frequency?}

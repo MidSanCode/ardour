@@ -1322,6 +1322,15 @@ jobs:
             # renders, and a long render has to be cancellable
             grep -E 'ARDOUR_EXPORT_ASYNC polls=[0-9]+ max_roundtrip=[0-9]+ms cancelled=true' logcat.txt
 
+            # --- sends ----------------------------------------------------------
+            # A send is a processor in the source's chain, so the test has to
+            # see it appear on the strip, take a level, move from behind the
+            # fader to in front of it without losing that level, and go away
+            # again.  Two refusals are part of the check: a strip sending to
+            # itself, and the same send twice.
+            grep 'ARDOUR_SENDS add/set/move/remove ok' logcat.txt
+            test "$(grep -c '^.*send.add refused' logcat.txt)" -ge 2
+
             # --- the musical timeline ---------------------------------------------
             # The smoke test changes the tempo to 96 and the meter to 3/4, asks
             # for the bar grid and checks that a bar is three quarter notes long

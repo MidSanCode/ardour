@@ -74,7 +74,7 @@ ul { list-style: none; padding: 0; margin: 4px 0; }
 .meter.v > div { position: absolute; bottom: 0; width: 100%; height: 0; background: linear-gradient(0deg, var(--accent) 70%, #e0c050 85%, var(--hot)); transition: height 80ms linear; }
 
 /* mixer */
-#strips { flex: 1; display: flex; gap: 6px; overflow-x: auto; min-height: 0; padding-bottom: 4px; }
+#strips { flex: 1; display: flex; gap: 6px; overflow-x: auto; overflow-y: auto; min-height: 0; padding-bottom: 4px; }
 .strip { flex: none; width: 92px; display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 6px 4px; background: #23262d; border: 1px solid var(--line); border-radius: 6px; position: relative; }
 .strip.master { background: #2a2630; margin-left: auto; }
 .strip.bus { background: #232b2a; }
@@ -140,6 +140,17 @@ ul { list-style: none; padding: 0; margin: 4px 0; }
 .strip-plugins button { font-size: 10px; padding: 2px 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: left; }
 .strip-plugins button.bypassed { opacity: .5; text-decoration: line-through; }
 .strip-plugins button.instrument { border-color: #5fae7d; }
+
+/* sends on strips: the name doubles as the pre/post switch */
+.strip-sends { display: flex; flex-direction: column; gap: 3px; width: 100%; margin-top: 2px; }
+.send-row { display: flex; flex-direction: column; gap: 1px; width: 100%; padding-top: 3px; border-top: 1px solid #2f333b; }
+.send-top { display: flex; align-items: center; gap: 2px; width: 100%; }
+.send-name { flex: 1; min-width: 0; font-size: 10px; padding: 1px 3px; text-align: left; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; border-color: #4a5568; }
+.send-name.pre { color: #f0c060; border-color: #6b5a2a; }
+.send-remove { flex: none; font-size: 10px; padding: 1px 4px; border: none; background: transparent; color: var(--dim); }
+.send-level { width: 100%; height: 16px; }
+.send-gain { font-size: 9px; color: var(--dim); font-family: ui-monospace, monospace; text-align: center; }
+.add-send { font-size: 10px; padding: 2px 3px; }
 .plugin-params { padding: 8px; display: grid; grid-template-columns: minmax(64px, auto) minmax(0, 1fr) minmax(52px, auto); gap: 6px 10px; align-items: center; }
 .plugin-params label { font-size: 12px; color: #ccc; }
 .plugin-params .val { font-size: 11px; color: #aaa; text-align: right; font-variant-numeric: tabular-nums; }

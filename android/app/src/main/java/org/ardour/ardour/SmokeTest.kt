@@ -595,6 +595,55 @@ object SmokeTest {
         call(host, "meter.set", JSONObject().put("beats", 4).put("unit", 4))
     }
 
+    /** a request that has to be refused, for the error paths */
+    private fun refused(host: EngineHost, method: String, params: JSONObject) {
+        val reply = JSONObject(host.call(method, params.toString()))
+        if (reply.optBoolean("ok", false)) fail("$method was accepted but should not have been: $reply")
+        Log.i(TAG, "$method refused: ${reply.optString("error")}")
+    }
+
+    /**
+     * Sends: one track feeding a bus.  A send is a processor in the source's
+     * chain, so pre and post mean on one side of the fader or the other;
+     * flipping it has to move the processor and keep the level.
+     */
+    private fun checkSends(host: EngineHost, track: String, bus: String) {
+        fun sendsOf(id: String): org.json.JSONArray {
+            val strips = call(host, "mixer.strips").getJSONArray("strips")
+            for (i in 0 until strips.length()) {
+                if (strips.getJSONObject(i).getString("id") == id) return strips.getJSONObject(i).getJSONArray("sends")
+            }
+            fail("strip $id is not in the mixer")
+        }
+
+        if (sendsOf(track).length() != 0) fail("a new track already has sends")
+        refused(host, "send.add", JSONObject().put("track", track).put("target", track))
+
+        var strip = call(host, "send.add", JSONObject().put("track", track).put("target", bus)).getJSONObject("strip")
+        var sends = strip.getJSONArray("sends")
+        if (sends.length() != 1) fail("the send was not created: $strip")
+        if (sends.getJSONObject(0).getString("target") != bus) fail("the send points somewhere else: $sends")
+        if (sends.getJSONObject(0).getBoolean("pre")) fail("the send should be post-fader by default: $sends")
+
+        refused(host, "send.add", JSONObject().put("track", track).put("target", bus))
+
+        strip = call(host, "send.set",
+            JSONObject().put("track", track).put("target", bus).put("gain_db", -12)).getJSONObject("strip")
+        sends = strip.getJSONArray("sends")
+        if (!near(sends.getJSONObject(0).getDouble("gain_db"), -12.0, 0.1)) fail("the send level did not apply: $sends")
+
+        strip = call(host, "send.set",
+            JSONObject().put("track", track).put("target", bus).put("pre", true)).getJSONObject("strip")
+        sends = strip.getJSONArray("sends")
+        if (!sends.getJSONObject(0).getBoolean("pre")) fail("the send did not move in front of the fader: $sends")
+        if (!near(sends.getJSONObject(0).getDouble("gain_db"), -12.0, 0.1)) fail("moving the send lost its level: $sends")
+
+        strip = call(host, "send.remove", JSONObject().put("track", track).put("target", bus)).getJSONObject("strip")
+        if (strip.getJSONArray("sends").length() != 0) fail("the send was not removed: $strip")
+
+        Log.i(TAG, "ARDOUR_SENDS add/set/move/remove ok on $track -> $bus")
+    }
+
     private fun checkEditing(host: EngineHost, scratch: File) {
         val rate = call(host, "engine.status").optLong("sample_rate", 48000L)
 
@@ -602,7 +651,7 @@ object SmokeTest {
         val vocals = call(host, "tracks.add", JSONObject().put("name", "Vocals").put("channels", 1)).getString("id")
         val guitar = call(host, "tracks.add", JSONObject().put("name", "Guitar").put("channels", 2)).getString("id")
         val temp = call(host, "tracks.add", JSONObject().put("name", "Temp").put("channels", 1)).getString("id")
-        call(host, "buses.add", JSONObject().put("name", "Reverb"))
+        val bus = call(host, "buses.add", JSONObject().put("name", "Reverb")).getJSONObject("strip").getString("id")
         call(host, "tracks.remove", JSONObject().put("id", temp))
 
         val strips = call(host, "mixer.strips").getJSONArray("strips")
@@ -619,6 +668,7 @@ object SmokeTest {
         if (strip.getBoolean("mute")) fail("unmute did not apply")
         call(host, "strip.set", JSONObject().put("id", guitar).put("solo", true))
         call(host, "strip.set", JSONObject().put("id", guitar).put("solo", false))
+        checkSends(host, vocals, bus)
 
         val first = call(host, "regions.tone", JSONObject().put("track", vocals).put("position", 0).put("seconds", 2))
             .getJSONObject("region")

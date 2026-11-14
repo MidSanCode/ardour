@@ -996,7 +996,7 @@
       if (!r.ok) return;
       var sameShape = r.strips.length === state.strips.length && r.strips.every(function (s, i) {
         return state.strips[i].id === s.id && state.strips[i].name === s.name &&
-          pluginKey(state.strips[i]) === pluginKey(s);
+          pluginKey(state.strips[i]) === pluginKey(s) && sendKey(state.strips[i]) === sendKey(s);
       });
       state.strips = r.strips;
       if (sameShape && $('strips').children.length) {
@@ -1011,6 +1011,14 @@
     return (s.plugins || []).map(function (p) { return p.id + (p.active ? '+' : '-'); }).join(',');
   }
 
+  /* what a strip's send block looks like: a level or a pre/post flip keeps the
+   * same shape, so the block is not rebuilt under the finger */
+  function sendKey(s) {
+    return (s.sends || []).map(function (x) {
+      return x.target + (x.pre ? '^' : '_') + (x.active ? '+' : '-');
+    }).join(',');
+  }
+
   function renderStrips() {
     var box = $('strips');
     box.innerHTML = '';
@@ -1020,11 +1028,15 @@
   function setStrip(id, params) {
     params.id = id;
     return call('strip.set', params).then(checked).then(function (r) {
-      for (var i = 0; i < state.strips.length; i++) if (state.strips[i].id === id) state.strips[i] = r.strip;
-      updateStrip(r.strip);
+      replaceStrip(r.strip);
       /* solo changes other strips' implicit state */
       if ('solo' in params) refreshStrips();
     }).catch(ignore);
+  }
+
+  function replaceStrip(strip) {
+    for (var i = 0; i < state.strips.length; i++) if (state.strips[i].id === strip.id) state.strips[i] = strip;
+    updateStrip(strip);
   }
 
   /* a fader request at a time; the latest value wins */
@@ -1092,6 +1104,16 @@
     plugs.appendChild(addFx);
     div.appendChild(plugs);
 
+    if (s.kind !== 'master') {
+      var sends = el('div', 'strip-sends');
+      (s.sends || []).forEach(function (sd) { sends.appendChild(sendRow(s, sd)); });
+      var addSend = el('button', 'add-send', '+ Send');
+      addSend.title = 'Feed this strip into another track or bus';
+      addSend.onclick = function () { openSendPicker(s.id); };
+      sends.appendChild(addSend);
+      div.appendChild(sends);
+    }
+
     var buttons = el('div', 'strip-buttons');
     [['mute', 'M'], ['solo', 'S'], ['rec', 'R']].forEach(function (b) {
       var btn = el('button', 'toggle ' + b[0], b[1]);
@@ -1138,6 +1160,98 @@
   $('add-bus').onclick = function () {
     call('buses.add', { name: 'Bus' }).then(checked).then(refreshStrips).catch(ignore);
   };
+
+  /* --------------------------------------------------------------- sends */
+
+  function sendLabel(sd) {
+    return (sd.pre ? 'pre ' : 'post ') + formatGain(sd.gain_db);
+  }
+
+  function setSend(track, target, params) {
+    params.track = track;
+    params.target = target;
+    return call('send.set', params).then(checked).then(function (r) {
+      replaceStrip(r.strip);
+      return r;
+    }).catch(ignore);
+  }
+
+  /* one send: its name flips pre/post, its slider is the send level */
+  function sendRow(s, sd) {
+    var row = el('div', 'send-row');
+    row.dataset.target = sd.target;
+
+    var top = el('div', 'send-top');
+    var name = el('button', 'send-name' + (sd.pre ? ' pre' : ''), sd.name);
+    name.title = sd.name + (sd.pre ? ' — pre-fader' : ' — post-fader') +
+      '. Tap to move it to the other side of the fader.';
+    name.onclick = function () {
+      /* the shape key carries pre/post, so the refresh rebuilds the block */
+      call('send.set', { track: s.id, target: sd.target, pre: !sd.pre })
+        .then(checked).then(refreshStrips).catch(ignore);
+    };
+    top.appendChild(name);
+
+    var rm = el('button', 'send-remove', '✕');
+    rm.title = 'Remove this send';
+    rm.onclick = function () {
+      call('send.remove', { track: s.id, target: sd.target })
+        .then(checked).then(refreshStrips).catch(ignore);
+    };
+    top.appendChild(rm);
+    row.appendChild(top);
+
+    var lvl = el('input', 'send-level');
+    lvl.type = 'range'; lvl.min = -60; lvl.max = 6; lvl.step = 0.1;
+    lvl.value = Math.max(-60, sd.gain_db);
+    var label = el('div', 'send-gain', sendLabel(sd));
+    var push = throttled(function (v) { return setSend(s.id, sd.target, { gain_db: v }); });
+    lvl.oninput = function () {
+      label.textContent = (sd.pre ? 'pre ' : 'post ') + formatGain(Number(lvl.value));
+      push(Number(lvl.value));
+    };
+    lvl.ondblclick = function () { lvl.value = 0; lvl.oninput(); };
+    row.appendChild(lvl);
+    row.appendChild(label);
+
+    return row;
+  }
+
+  function openSendPicker(routeId) {
+    var strip = state.strips.filter(function (x) { return x.id === routeId; })[0];
+    if (!strip) return;
+    refreshStrips().then(function () {
+      strip = state.strips.filter(function (x) { return x.id === routeId; })[0] || strip;
+      var have = {};
+      (strip.sends || []).forEach(function (sd) { have[sd.target] = true; });
+      openOverlay({ kind: 'sends', route: routeId }, 'Send ' + strip.name + ' to');
+      var list = el('ul', 'plugin-list');
+      state.strips.forEach(function (t) {
+        /* the master is a singleton: it takes no sends */
+        if (t.id === routeId || t.kind === 'master' || have[t.id]) return;
+        var li = el('li');
+        var label = el('span', '', t.name + ' ');
+        label.appendChild(el('small', '', t.kind === 'bus' ? 'bus' : t.kind + ' track'));
+        li.appendChild(label);
+        [['Post', false], ['Pre', true]].forEach(function (p) {
+          var b = el('button', '', p[0]);
+          b.title = p[1] ? 'Send from before the fader' : 'Send from after the fader';
+          b.onclick = function () {
+            call('send.add', { track: routeId, target: t.id, pre: p[1] })
+              .then(checked).then(closeOverlay).then(refreshStrips).catch(ignore);
+          };
+          li.appendChild(b);
+        });
+        list.appendChild(li);
+      });
+      if (!list.children.length) {
+        $('overlay-body').appendChild(el('p', 'hint',
+          'Nothing to send to yet — add a bus with + Bus and it shows up here.'));
+      } else {
+        $('overlay-body').appendChild(list);
+      }
+    }).catch(ignore);
+  }
 
   /* --------------------------------------------------------------- polling */
 
