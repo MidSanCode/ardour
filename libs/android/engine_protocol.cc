@@ -1010,10 +1010,20 @@ m_session_delete_template (Params& p)
 		return error_reply ("no such session template: " + name);
 	}
 
-	/* the search path also finds the templates shipped with the application;
-	 * those live in read-only assets and are not the user's to delete */
-	std::string const user_dir = user_template_directory ();
-	if (path.compare (0, user_dir.size (), user_dir) != 0) {
+	/* The search path also finds the templates that came with the application;
+	 * those live in the app's own data directory and are not the user's to
+	 * delete.  The two paths are compared by inode rather than as strings: the
+	 * search path builds its entries by concatenation, so the same directory
+	 * arrives spelled with a doubled separator. */
+	std::string const user_path = Glib::build_filename (user_template_directory (), name);
+	GStatBuf found_st, user_st;
+	bool const is_users =
+		g_stat (path.c_str (), &found_st) == 0 &&
+		g_stat (user_path.c_str (), &user_st) == 0 &&
+		found_st.st_dev == user_st.st_dev &&
+		found_st.st_ino == user_st.st_ino;
+
+	if (!is_users) {
 		return error_reply ("that template came with the application");
 	}
 
