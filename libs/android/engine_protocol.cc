@@ -596,6 +596,10 @@ close_session ()
 		return;
 	}
 	session->request_stop ();
+	/* ~Session (via Session::destroy) takes the session out of the engine
+	 * before it drops the ports, so nothing here has to do that - but it does
+	 * mean the delete is where a lifetime bug in libardour will show up, a
+	 * second or two later and in whatever thread was touching the session. */
 	delete session;
 	session = 0;
 }

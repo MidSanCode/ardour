@@ -759,6 +759,18 @@ Session::destroy ()
 	/* reset dynamic state version back to default */
 	Stateful::loading_state_version = 0;
 
+	/* Stop the butler before anything it uses goes away.  Its thread runs
+	 * butler_transport_work(), which walks the I/O task list and the route
+	 * graphs; resetting those while it is still running is a use-after-free
+	 * that shows up as a SIGSEGV in the butler, some time after the session
+	 * was deleted.  It was only reachable when a session is destroyed while
+	 * the engine keeps running - which is what a host that opens and closes
+	 * sessions without stopping the engine does.
+	 */
+	_butler->drop_references ();
+	delete _butler;
+	_butler = 0;
+
 	/* drop GraphNode references */
 	_graph_chain.reset ();
 	_current_route_graph = GraphEdges ();
@@ -767,10 +779,6 @@ Session::destroy ()
 	_io_graph_chain[1].reset ();
 
 	_io_tasklist.reset ();
-
-	_butler->drop_references ();
-	delete _butler;
-	_butler = 0;
 
 	if (click_data != default_click) {
 		delete [] click_data;
