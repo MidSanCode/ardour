@@ -19,9 +19,12 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <cerrno>
 #include <algorithm>
 #include <cassert>
 #include <set>
+
+#include <sys/resource.h>
 
 #include <glibmm.h>
 #include <pthread.h>
@@ -39,6 +42,36 @@
 using namespace ARDOUR;
 
 static std::string s_instance_name;
+
+/* Android: SCHED_FIFO needs CAP_SYS_NICE, which an app never has, so the
+ * realtime thread creation in start()/create_process_thread() fails and the
+ * thread runs at ordinary priority instead.  The platform's own answer is a
+ * deep nice value: -16 is android.os.Process.THREAD_PRIORITY_AUDIO, and an
+ * app's RLIMIT_NICE is set so it may ask for it.  Without this the process
+ * thread competes with the UI thread and AAudio's buffer starves - on a
+ * Redmi Note 9 that shows up as AudioFlinger logging "underrun due to thread
+ * sleep of 1024 frames" while a test tone plays.
+ *
+ * A thread has to lower its own nice value (an unprivileged process cannot
+ * raise another thread's), so this is called from inside the thread.
+ */
+static void
+android_raise_thread_priority (const char* what)
+{
+#ifdef __ANDROID__
+	errno = 0;
+	const int before = getpriority (PRIO_PROCESS, 0);
+
+	if (setpriority (PRIO_PROCESS, 0, -16) == 0) {
+		PBD::info << "AAudioBackend: " << what << " priority " << before << " -> -16" << endmsg;
+	} else {
+		PBD::warning << "AAudioBackend: could not raise the " << what << " priority: "
+			     << strerror (errno) << endmsg;
+	}
+#else
+	(void) what;
+#endif
+}
 
 /* the DSP load is measured with the monotonic clock of glib */
 static int64_t
@@ -420,6 +453,7 @@ AAudioBackend::aaudio_worker_thread (void* arg)
 	ThreadData* td = reinterpret_cast<ThreadData*> (arg);
 	std::function<void ()> f = td->f;
 	delete td;
+	android_raise_thread_priority ("worker thread");
 	f ();
 	return 0;
 }
@@ -853,6 +887,8 @@ AAudioBackend::aaudio_process_thread (void *arg)
 void*
 AAudioBackend::main_process_thread ()
 {
+	android_raise_thread_priority ("process thread");
+
 	AudioEngine::thread_init_callback (this);
 
 	_running = true;

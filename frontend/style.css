@@ -169,4 +169,39 @@ ul { list-style: none; padding: 0; margin: 4px 0; }
 .kb-key.down { background: #5fae7d; }
 .kb-key.black.down { background: #3d7a55; }
 .velocity { width: 90px; }
-.vel-label { font-size: 11px; color: #aaa; align-self: center; }
+/* without this the label shrinks to nothing and its text paints outside the
+ * panel, where overflow:hidden cuts it in half (seen on a 1080px phone) */
+.vel-label { flex: none; font-size: 11px; color: #aaa; align-self: center; }
+
+/* ---- phones --------------------------------------------------------------
+ * A 1080x2340 phone is about 390 CSS px wide, so the editor's three tool bars
+ * wrap into eight rows and leave the timeline - the one thing the view exists
+ * for - a 150px sliver.  Below 620px the bars scroll sideways instead, one row
+ * each, and the help text is clamped to two lines.  Measured on a Redmi Note 9
+ * (M2007J22C, Android 12): the timeline went from ~130 to ~430 CSS px.
+ */
+@media (max-width: 620px) {
+  body { padding: 6px; gap: 6px; }
+  .bar.wrap {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: none;
+    /* a scroll row needs its own touch lane, or the first swipe scrolls the
+       page instead of the row */
+    touch-action: pan-x;
+  }
+  .bar.wrap::-webkit-scrollbar { display: none; }
+  .bar.wrap > * { flex: none; }
+  .bar.wrap > form { flex: 1 1 auto; flex-wrap: nowrap; }
+  .bar.wrap > .spacer { flex: 1 0 8px; }
+  #add-track input { flex: 1 1 5em; }
+  #view-editor .hint {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    overflow: hidden;
+  }
+  #timeline { min-height: 220px; }
+  #track-heads { width: 88px; }
+}
