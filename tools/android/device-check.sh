@@ -13,10 +13,12 @@
 #     processed, not just reported as running.
 #
 # usage:
-#   tools/android/device-check.sh [-s SERIAL] [-a APK]
+#   tools/android/device-check.sh [-s SERIAL] [-a APK] [-n]
 #
 #   -s SERIAL   adb serial (default: the only connected device)
 #   -a APK      APK to install (default: android/app/build/outputs/apk/debug/app-debug.apk)
+#   -n          skip the install: the APK is already on the device (over Wi-Fi,
+#               streaming 190 MB again per run is the slowest part of this)
 #
 # Exit status is 0 only when every check passes.  The logcat is always written
 # to device-check-logcat.txt and the UI screenshots to ui-*.png next to it.
@@ -25,12 +27,14 @@ set -eu
 
 SERIAL_ARG=""
 APK="$(dirname "$0")/../../android/app/build/outputs/apk/debug/app-debug.apk"
+DO_INSTALL=1
 
-while getopts "s:a:h" opt; do
+while getopts "s:a:nh" opt; do
 	case "$opt" in
 		s) SERIAL_ARG="-s $OPTARG" ;;
 		a) APK="$OPTARG" ;;
-		h) sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+		n) DO_INSTALL=0 ;;
+		h) sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
 		*) echo "unknown option; try -h" >&2; exit 2 ;;
 	esac
 done
@@ -42,7 +46,7 @@ fail() {
 	exit 1
 }
 
-[ -f "$APK" ] || fail "no APK at $APK (build it with: cd android && gradle assembleDebug)"
+[ "$DO_INSTALL" = 0 ] || [ -f "$APK" ] || fail "no APK at $APK (build it with: cd android && gradle assembleDebug)"
 command -v adb >/dev/null 2>&1 || fail "adb is not on PATH"
 
 # ---- the device has to be a real one -------------------------------------
@@ -62,7 +66,12 @@ fi
 
 # ---- install and run -----------------------------------------------------
 echo "== install =="
-$ADB install -r -g "$APK" || fail "install failed"
+if [ "$DO_INSTALL" = 1 ]; then
+	[ -f "$APK" ] || fail "no APK at $APK (build it with: cd android && gradle assembleDebug)"
+	$ADB install -r -g "$APK" || fail "install failed"
+else
+	echo "(skipped: -n)"
+fi
 
 $ADB logcat -c
 $ADB shell am force-stop org.ardour.ardour || true
