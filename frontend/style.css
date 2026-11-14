@@ -74,9 +74,14 @@ ul { list-style: none; padding: 0; margin: 4px 0; }
 .meter.v > div { position: absolute; bottom: 0; width: 100%; height: 0; background: linear-gradient(0deg, var(--accent) 70%, #e0c050 85%, var(--hot)); transition: height 80ms linear; }
 
 /* mixer */
-#strips { flex: 1; display: flex; gap: 6px; overflow-x: auto; overflow-y: auto; min-height: 0; padding-bottom: 4px; }
+/* the master is a column of its own, not a strip that floats over the others:
+ * it used to be position:sticky inside the scrolling row, which meant it sat
+ * on top of the strip next to it and hid its buttons */
+#mixer-body { flex: 1; display: flex; gap: 6px; min-height: 0; min-width: 0; }
+#strips { flex: 1; display: flex; gap: 6px; overflow-x: auto; overflow-y: auto; min-height: 0; min-width: 0; padding-bottom: 4px; }
+#master-strip { flex: none; display: flex; align-items: flex-start; padding-left: 6px; border-left: 1px solid var(--line); overflow-y: auto; }
 .strip { flex: none; width: 92px; display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 6px 4px; background: #23262d; border: 1px solid var(--line); border-radius: 6px; position: relative; }
-.strip.master { background: #2a2630; margin-left: auto; }
+.strip.master { background: #2a2630; }
 .strip.bus { background: #232b2a; }
 .strip-name { font-size: 12px; font-weight: 600; width: 100%; text-align: center; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 0 12px; }
 .pan { width: 80px; }
@@ -107,7 +112,6 @@ ul { list-style: none; padding: 0; margin: 4px 0; }
 .region .trim.r { right: 0; border-right: 3px solid #fff; }
 .region .fade-h { top: 0; width: 14px; height: 14px; background: #e0c050; border-radius: 2px; cursor: ew-resize; }
 .region.dragging .handle { display: none; }
-.strip.master { position: sticky; right: 0; z-index: 1; box-shadow: -6px 0 8px rgba(0,0,0,.4); }
 
 /* MIDI regions */
 .region.midi { background: #2f4a3a; border-color: #5fae7d; }
@@ -207,6 +211,10 @@ progress[hidden] { display: none; }
     /* a scroll row needs its own touch lane, or the first swipe scrolls the
        page instead of the row */
     touch-action: pan-x;
+    /* the shadow sits on the padding box, so it stays at the edge while the
+       row scrolls: that edge is the only hint that there are more buttons to
+       the right, which is what made them undiscoverable on a phone */
+    box-shadow: inset -16px 0 12px -12px rgba(0, 0, 0, .9);
   }
   .bar.wrap::-webkit-scrollbar { display: none; }
   .bar.wrap > * { flex: none; }
@@ -221,4 +229,13 @@ progress[hidden] { display: none; }
   }
   #timeline { min-height: 220px; }
   #track-heads { width: 88px; }
+  /* 88px minus padding minus the rec and automation buttons leaves about
+     30px for the name, which is what turned "Vocals" into "V…".  Let the name
+     have the row to itself and put the two buttons underneath it: the lane is
+     64px tall and has room for both lines. */
+  .track-head .head-row { flex-wrap: wrap; row-gap: 2px; }
+  .track-head .head-row .track-title {
+    flex: 1 0 100%;
+    font-size: 12px;
+  }
 }

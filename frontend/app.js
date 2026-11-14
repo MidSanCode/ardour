@@ -1043,7 +1043,7 @@
           pluginKey(state.strips[i]) === pluginKey(s) && sendKey(state.strips[i]) === sendKey(s);
       });
       state.strips = r.strips;
-      if (sameShape && $('strips').children.length) {
+      if (sameShape && ($('strips').children.length || $('master-strip').children.length)) {
         r.strips.forEach(updateStrip);
       } else {
         renderStrips();
@@ -1065,8 +1065,14 @@
 
   function renderStrips() {
     var box = $('strips');
+    var master = $('master-strip');
     box.innerHTML = '';
-    state.strips.forEach(function (s) { box.appendChild(stripElement(s)); });
+    master.innerHTML = '';
+    /* the master bus is its own column so it cannot sit on top of the last
+     * track's buttons */
+    state.strips.forEach(function (s) {
+      (s.kind === 'master' ? master : box).appendChild(stripElement(s));
+    });
   }
 
   function setStrip(id, params) {
