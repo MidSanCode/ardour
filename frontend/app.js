@@ -108,7 +108,7 @@
     }
     $('current').textContent = state.session ? state.session.name : 'no session';
     var haveSession = !!state.session;
-    ['save', 'close', 'play', 'stop', 'home', 'record'].forEach(function (id) { $(id).disabled = !haveSession; });
+    ['save', 'close', 'save-as', 'save-template', 'play', 'stop', 'home', 'record'].forEach(function (id) { $(id).disabled = !haveSession; });
     document.querySelectorAll('#tabs button[data-view="editor"], #tabs button[data-view="mixer"]').forEach(function (b) {
       b.disabled = !haveSession;
     });
@@ -205,7 +205,13 @@
   }
 
   document.querySelectorAll('#tabs button').forEach(function (b) {
-    b.onclick = function () { if (!b.disabled) showView(b.dataset.view); };
+    b.onclick = function () {
+      if (b.disabled) return;
+      showView(b.dataset.view);
+      /* the list is where sizes and names are: read it again on the way in
+       * rather than polling it behind the other views */
+      if (b.dataset.view === 'session') refreshSessions();
+    };
   });
 
   function refreshAll() {
@@ -214,36 +220,216 @@
 
   /* -------------------------------------------------------------- sessions */
 
+  function formatBytes(n) {
+    if (!n) return '0 kB';
+    var mb = n / (1024 * 1024);
+    if (mb >= 100) return Math.round(mb) + ' MB';
+    if (mb >= 1) return mb.toFixed(1) + ' MB';
+    return Math.max(1, Math.round(n / 1024)) + ' kB';
+  }
+
+  function formatWhen(seconds) {
+    if (!seconds) return '';
+    var d = new Date(seconds * 1000);
+    var now = new Date();
+    if (d.toDateString() === now.toDateString()) {
+      return d.toTimeString().slice(0, 5);
+    }
+    return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  }
+
+  function refreshSessionInfo() {
+    if (!state.session) { $('session-info').textContent = ''; return Promise.resolve(); }
+    return call('session.info').then(function (r) {
+      if (!r.ok) { $('session-info').textContent = ''; return; }
+      var bits = [r.tracks + (r.tracks === 1 ? ' track' : ' tracks')];
+      bits.push(formatBytes(r.bytes));
+      if (r.dirty) bits.push('unsaved changes');
+      $('session-info').textContent = bits.join(' · ');
+    }).catch(ignore);
+  }
+
+  function fillTemplates(list) {
+    var sel = $('new-template');
+    var keep = sel.value;
+    sel.innerHTML = '';
+    var empty = el('option', '', 'empty session');
+    empty.value = '';
+    sel.appendChild(empty);
+    list.forEach(function (t) {
+      var o = el('option', '', t.name);
+      o.value = t.name;
+      if (t.description) o.title = t.description;
+      sel.appendChild(o);
+    });
+    sel.value = keep;
+  }
+
+  /* A row in the session list.  The desktop does all of this from dialogs; a
+   * phone has no dialogs (the WebView has no WebChromeClient, so alert() and
+   * prompt() do nothing at all), which is why renaming and deleting happen in
+   * the row itself. */
+  function sessionRow(s) {
+    var li = el('li', 'session-row');
+    if (s.open) li.classList.add('open');
+
+    var what = el('div', 'session-what');
+    what.appendChild(el('span', 'session-title', s.name));
+    what.appendChild(el('span', 'session-meta',
+      formatBytes(s.bytes) + (s.modified ? ' · ' + formatWhen(s.modified) : '') +
+      (s.open ? ' · open' : '')));
+    li.appendChild(what);
+
+    var buttons = el('div', 'session-buttons');
+
+    var open = el('button', '', 'Open');
+    open.onclick = function () {
+      call('session.open', { name: s.name }).then(checked).then(afterSessionChange).catch(ignore);
+    };
+    buttons.appendChild(open);
+
+    var rename = el('button', 'icon', 'Rename');
+    if (!s.open) {
+      /* Session::rename() renames a loaded session's directory, state file,
+       * history and interchange folder.  A closed one would have to be opened
+       * first - renaming the folder behind libardour's back would break the
+       * absolute source paths inside the state file. */
+      rename.disabled = true;
+      rename.title = 'Open the session to rename it';
+    } else {
+      rename.title = 'Rename this session';
+      rename.onclick = function () { li.replaceWith(sessionRenameRow(s)); };
+    }
+    buttons.appendChild(rename);
+
+    var del = el('button', 'icon', 'Delete');
+    if (s.open) {
+      del.disabled = true;
+      del.title = 'Close the session to delete it';
+    } else {
+      del.title = 'Delete this session and everything in it';
+      del.onclick = function () { li.replaceWith(sessionDeleteRow(s)); };
+    }
+    buttons.appendChild(del);
+
+    li.appendChild(buttons);
+    return li;
+  }
+
+  function sessionRenameRow(s) {
+    var li = el('li', 'session-row editing');
+    if (s.open) li.classList.add('open');
+    var input = el('input', 'session-rename');
+    input.value = s.name;
+    input.autocomplete = 'off';
+    li.appendChild(input);
+
+    var buttons = el('div', 'session-buttons');
+    var go = el('button', '', 'Rename');
+    go.onclick = function () {
+      var name = input.value.trim();
+      if (!name || name === s.name) { refreshSessions(); return; }
+      call('session.rename', { name: name }).then(checked).then(function (st) {
+        message('renamed to ' + name);
+        return afterSessionChange(st);
+      }).catch(function () { refreshSessions(); });
+    };
+    var cancel = el('button', '', 'Cancel');
+    cancel.onclick = function () { refreshSessions(); };
+    buttons.appendChild(go);
+    buttons.appendChild(cancel);
+    li.appendChild(buttons);
+    input.focus();
+    return li;
+  }
+
+  function sessionDeleteRow(s) {
+    var li = el('li', 'session-row confirm');
+    var what = el('div', 'session-what');
+    what.appendChild(el('span', 'session-title', 'Delete "' + s.name + '"?'));
+    what.appendChild(el('span', 'session-meta', formatBytes(s.bytes) + ' will be gone for good'));
+    li.appendChild(what);
+
+    var buttons = el('div', 'session-buttons');
+    var go = el('button', '', 'Delete');
+    go.onclick = function () {
+      /* the name is repeated back as "confirm": a second tap in the same place
+       * must not be able to remove the wrong session */
+      call('session.delete', { name: s.name, confirm: s.name }).then(checked).then(function () {
+        message('deleted ' + s.name);
+        return refreshSessions();
+      }).catch(function () { refreshSessions(); });
+    };
+    var cancel = el('button', '', 'Cancel');
+    cancel.onclick = function () { refreshSessions(); };
+    buttons.appendChild(go);
+    buttons.appendChild(cancel);
+    li.appendChild(buttons);
+    return li;
+  }
+
   function refreshSessions() {
-    return call('session.list').then(function (r) {
+    return Promise.all([call('session.list'), call('session.templates')]).then(function (both) {
+      var r = both[0], t = both[1];
       var ul = $('session-list');
       ul.innerHTML = '';
-      if (!r.ok) return;
-      r.sessions.forEach(function (name) {
-        var li = el('li');
-        li.appendChild(el('span', '', name));
-        var open = el('button', '', 'Open');
-        open.onclick = function () {
-          call('session.open', { name: name }).then(checked).then(afterSessionChange).catch(ignore);
-        };
-        li.appendChild(open);
-        ul.appendChild(li);
-      });
-    });
+      if (r.ok) r.sessions.forEach(function (s) { ul.appendChild(sessionRow(s)); });
+      if (t.ok) fillTemplates(t.templates);
+      return refreshSessionInfo();
+    }).catch(ignore);
   }
 
   $('create').onsubmit = function (e) {
     e.preventDefault();
     var name = $('new-name').value.trim();
     if (!name) return;
-    call('session.create', { name: name }).then(checked).then(function (st) {
+    var params = { name: name };
+    if ($('new-template').value) params.template = $('new-template').value;
+    call('session.create', params).then(checked).then(function (st) {
       $('new-name').value = '';
       return afterSessionChange(st);
     }).catch(ignore);
   };
 
-  $('save').onclick = function () { call('session.save').then(checked).then(function () { message('saved'); }).catch(ignore); };
+  $('save').onclick = function () {
+    call('session.save').then(checked).then(function () {
+      message('saved');
+      return refreshSessionInfo();
+    }).catch(ignore);
+  };
   $('close').onclick = function () { call('session.close').then(checked).then(afterSessionChange).catch(ignore); };
+
+  $('save-as').onclick = function () {
+    var form = $('save-as-form');
+    form.hidden = !form.hidden;
+    if (!form.hidden) {
+      $('save-as-name').value = state.session ? state.session.name + '-copy' : '';
+      $('save-as-name').focus();
+    }
+  };
+
+  $('save-as-cancel').onclick = function () { $('save-as-form').hidden = true; };
+
+  $('save-as-form').onsubmit = function (e) {
+    e.preventDefault();
+    var name = $('save-as-name').value.trim();
+    if (!name) return;
+    var copy = $('save-as-media').checked;
+    message(copy ? 'copying, the interface will pause…' : '');
+    call('session.save_as', { name: name, copy_media: copy }).then(checked).then(function (r) {
+      $('save-as-form').hidden = true;
+      message('saved a copy as ' + r.name);
+      return refreshSessions();
+    }).catch(ignore);
+  };
+
+  $('save-template').onclick = function () {
+    if (!state.session) return;
+    call('session.save_template', { name: state.session.name }).then(checked).then(function (r) {
+      message(r.replaced ? 'template ' + r.name + ' replaced' : 'template ' + r.name + ' saved');
+      return refreshSessions();
+    }).catch(ignore);
+  };
 
   /* --------------------------------------------------------------- export */
 

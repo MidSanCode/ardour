@@ -1379,6 +1379,16 @@ jobs:
             grep 'ARDOUR_BUFFER' logcat.txt
             grep -E 'ARDOUR_BUFFER (samples=[0-9]+ -> [0-9]+ -> [0-9]+|skipped )' logcat.txt
 
+            # --- managing the sessions -------------------------------------------
+            # A phone has no file manager for the app's own storage, so the
+            # session list is it: it has to say how big a session is, and it has
+            # to be able to copy, rename and remove one.  Three deletions must be
+            # refused - the open session, a wrong confirmation, a name that is
+            # not there - because this is a rm -rf with no trash behind it.
+            echo "--- ARDOUR_SESSIONS line ---"
+            grep 'ARDOUR_SESSIONS' logcat.txt
+            grep -E 'ARDOUR_SESSIONS bytes=[0-9]+ template=[^ ]+ copy=[^ ]+ rename=[^ ]+ refused=3' logcat.txt
+
       - name: Upload the log
         if: always()
         uses: actions/upload-artifact@v4

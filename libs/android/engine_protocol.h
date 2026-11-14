@@ -27,11 +27,26 @@
  *                                         size is put back if the device refuses.
  *                                         AAudio cannot resize an open stream, so
  *                                         this is the only way to change it.
- *   session.list                          the sessions in <user_dir>/sessions
- *   session.create   {name}               creates and loads a new session
+ *   session.list                          the sessions in <user_dir>/sessions, each with
+ *                                         its size on disk, when it was last written
+ *                                         and whether it is the one loaded now
+ *   session.create   {name, template?}    creates and loads a new session; the
+ *                                         template is a name from session.templates
  *   session.open     {name}               loads an existing session
  *   session.save
  *   session.close
+ *   session.info                          the loaded session: name, path, rate,
+ *                                         tracks, buses, size, unsaved changes
+ *   session.rename   {name}               renames the loaded session's directory,
+ *                                         state file, history and interchange folder
+ *   session.delete   {name, confirm}      removes a session and its audio; the name
+ *                                         has to be repeated in "confirm", and the
+ *                                         loaded session cannot be removed
+ *   session.save_as  {name, copy_media?}  writes a copy; without copy_media it
+ *                                         points at this session's audio instead
+ *   session.templates                     the session templates on the device
+ *   session.save_template   {name, description?}
+ *   session.delete_template {name}        only the user's own templates
  *   transport.play / transport.stop
  *   transport.state                       rolling, record_enabled, recording, position
  *   transport.record {enabled}            arms or disarms the session for recording

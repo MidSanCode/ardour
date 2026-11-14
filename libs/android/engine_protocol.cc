@@ -85,8 +85,10 @@
 #include "ardour/region_factory.h"
 #include "ardour/route.h"
 #include "ardour/session.h"
+#include "ardour/session_directory.h"
 #include "ardour/session_event.h"
 #include "ardour/simple_export.h"
+#include "ardour/template_utils.h"
 #include "ardour/track.h"
 #include "ardour/types.h"
 #include "ardour/utils.h"
@@ -150,6 +152,14 @@ static std::string
 error_reply (std::string const& msg)
 {
 	return "{\"ok\":false,\"error\":" + q (msg) + "}";
+}
+
+/* The parameters arrive as text: "true" and "1" are the two spellings of yes
+ * that the frontend and the smoke test use. */
+static bool
+truthy (std::string const& v)
+{
+	return v == "true" || v == "1";
 }
 
 static std::string
@@ -590,25 +600,145 @@ close_session ()
 	session = 0;
 }
 
+/* Bytes under a directory, recursively, without following symlinks: the number
+ * a user wants to see next to a session is "what would I get back if I deleted
+ * this", and a link to a media file elsewhere is not that. */
+static gint64
+dir_bytes (std::string const& path)
+{
+	std::vector<std::string> names;
+
+	try {
+		Glib::Dir dir (path);
+		for (Glib::Dir::iterator i = dir.begin (); i != dir.end (); ++i) {
+			names.push_back (*i);
+		}
+	} catch (...) {
+		return 0;
+	}
+
+	gint64 total = 0;
+	for (auto const& n : names) {
+		std::string const child = Glib::build_filename (path, n);
+		GStatBuf st;
+		if (g_lstat (child.c_str (), &st) != 0) {
+			continue;
+		}
+		if (S_ISDIR (st.st_mode)) {
+			total += dir_bytes (child);
+		} else if (S_ISREG (st.st_mode)) {
+			total += (gint64) st.st_size;
+		}
+	}
+	return total;
+}
+
+static gint64
+path_mtime (std::string const& path)
+{
+	GStatBuf st;
+	if (g_stat (path.c_str (), &st) != 0) {
+		return 0;
+	}
+	return (gint64) st.st_mtime;
+}
+
+/* Remove a directory and everything under it.  The names are collected before
+ * anything is unlinked: deleting entries while a directory stream is open
+ * makes the next readdir() skip some of them on some filesystems. */
+static bool
+remove_tree (std::string const& path)
+{
+	std::vector<std::string> names;
+
+	try {
+		Glib::Dir dir (path);
+		for (Glib::Dir::iterator i = dir.begin (); i != dir.end (); ++i) {
+			names.push_back (*i);
+		}
+	} catch (...) {
+		return false;
+	}
+
+	bool ok = true;
+	for (auto const& n : names) {
+		std::string const child = Glib::build_filename (path, n);
+		GStatBuf st;
+		if (g_lstat (child.c_str (), &st) != 0) {
+			ok = false;
+		} else if (S_ISDIR (st.st_mode)) {
+			if (!remove_tree (child)) {
+				ok = false;
+			}
+		} else if (g_unlink (child.c_str ()) != 0) {
+			ok = false;
+		}
+	}
+
+	return (g_rmdir (path.c_str ()) == 0) && ok;
+}
+
+static std::string
+session_entry_json (std::string const& name)
+{
+	std::string const dir = Glib::build_filename (sessions_root, name);
+
+	std::string j = "{\"name\":" + q (name);
+	j += ",\"bytes\":" + std::to_string ((long long) dir_bytes (dir));
+	j += ",\"modified\":" + std::to_string ((long long) path_mtime (Glib::build_filename (dir, name + statefile_suffix)));
+	j += std::string (",\"open\":") + ((session && session->name () == name) ? "true" : "false");
+	j += "}";
+	return j;
+}
+
 static std::string
 m_session_list ()
 {
 	std::string j = "{\"ok\":true,\"sessions\":[";
 	bool first = true;
+
+	/* sorted, because Glib::Dir hands them back in whatever order the
+	 * filesystem keeps them, which on a phone changes as sessions are made
+	 * and removed */
+	std::vector<std::string> names;
 	try {
 		Glib::Dir dir (sessions_root);
 		for (Glib::Dir::iterator i = dir.begin (); i != dir.end (); ++i) {
-			std::string name = *i;
-			std::string state = Glib::build_filename (sessions_root, name, name + statefile_suffix);
-			if (Glib::file_test (state, Glib::FILE_TEST_IS_REGULAR)) {
-				j += (first ? "" : ",") + q (name);
-				first = false;
-			}
+			names.push_back (*i);
 		}
 	} catch (...) {
 	}
+	std::sort (names.begin (), names.end ());
+
+	for (auto const& name : names) {
+		std::string const state = Glib::build_filename (sessions_root, name, name + statefile_suffix);
+		if (!Glib::file_test (state, Glib::FILE_TEST_IS_REGULAR)) {
+			continue;
+		}
+		j += (first ? "" : ",") + session_entry_json (name);
+		first = false;
+	}
+
 	j += "]}";
 	return j;
+}
+
+/* The path of a session template by name.  Only names that libardour itself
+ * lists are accepted, so a request cannot point the session at a path of its
+ * own choosing. */
+static bool
+find_session_template (std::string const& name, std::string& path)
+{
+	std::vector<TemplateInfo> templates;
+	find_session_templates (templates, false);
+
+	for (auto const& t : templates) {
+		if (t.name == name) {
+			path = t.path;
+			return true;
+		}
+	}
+	return false;
 }
 
 static std::string
@@ -626,11 +756,16 @@ m_session_create (Params& p)
 		return error_reply ("the engine is not running");
 	}
 
+	std::string template_path;
+	if (!p["template"].empty () && !find_session_template (p["template"], template_path)) {
+		return error_reply ("no such session template: " + p["template"]);
+	}
+
 	close_session ();
 
 	BusProfile bus_profile;
 	bus_profile.master_out_channels = 2;
-	session = new Session (*AudioEngine::instance (), dir, name, &bus_profile);
+	session = new Session (*AudioEngine::instance (), dir, name, &bus_profile, template_path);
 	AudioEngine::instance ()->set_session (session);
 	session->save_state ("");
 	return status_json ();
@@ -668,6 +803,226 @@ m_session_save ()
 	if (session->save_state ("") != 0) {
 		return error_reply ("saving the session failed");
 	}
+	return "{\"ok\":true}";
+}
+
+/* What the session currently is: the name the header shows, where it lives,
+ * how much room it takes.  The desktop shows this in the session dialog and in
+ * the window title; on a phone it is the only place the size is visible. */
+static std::string
+m_session_info ()
+{
+	std::string e = require_session ();
+	if (!e.empty ()) {
+		return e;
+	}
+
+	std::string const dir = session->session_directory ().root_path ();
+
+	std::string j = "{\"ok\":true";
+	j += ",\"name\":" + q (session->name ());
+	j += ",\"path\":" + q (dir);
+	j += ",\"sample_rate\":" + std::to_string ((long long) session->sample_rate ());
+	j += ",\"tracks\":" + std::to_string (session->ntracks ());
+	j += ",\"buses\":" + std::to_string (session->nbusses ());
+	j += std::string (",\"dirty\":") + (session->dirty () ? "true" : "false");
+	j += ",\"bytes\":" + std::to_string ((long long) dir_bytes (dir));
+	j += ",\"modified\":" + std::to_string ((long long) path_mtime (Glib::build_filename (dir, session->name () + statefile_suffix)));
+	j += "}";
+	return j;
+}
+
+/* Renaming renames the directory, the interchange folder inside it, the state
+ * file and the history - Session::rename() does all four, and it refuses to do
+ * it while recording.  It saves on the way out, which is why nothing else has
+ * to be done here. */
+static std::string
+m_session_rename (Params& p)
+{
+	std::string e = require_session ();
+	if (!e.empty ()) {
+		return e;
+	}
+
+	std::string const name = p["name"];
+	if (!valid_session_name (name)) {
+		return error_reply ("invalid session name");
+	}
+	if (name == session->name ()) {
+		return status_json ();
+	}
+	if (Glib::file_test (Glib::build_filename (sessions_root, name), Glib::FILE_TEST_EXISTS)) {
+		return error_reply ("a session with that name exists");
+	}
+	if (session->transport_rolling ()) {
+		return error_reply ("stop the transport before renaming");
+	}
+	if (session->actively_recording ()) {
+		return error_reply ("stop recording before renaming");
+	}
+
+	if (session->rename (name) != 0) {
+		return error_reply ("renaming the session failed");
+	}
+
+	return status_json ();
+}
+
+/* Deleting a session is a rm -rf with no trash to fish it back out of, so the
+ * caller has to repeat the name in "confirm" - a slip of the finger in a list
+ * of similar names must not be enough.  The open session is refused outright:
+ * its files are open and libardour would be left pointing at nothing. */
+static std::string
+m_session_delete (Params& p)
+{
+	std::string const name = p["name"];
+	if (!valid_session_name (name)) {
+		return error_reply ("invalid session name");
+	}
+	if (session && session->name () == name) {
+		return error_reply ("close the session before deleting it");
+	}
+	if (p["confirm"] != name) {
+		return error_reply ("send the session's name as \"confirm\" to delete it");
+	}
+
+	std::string const dir = Glib::build_filename (sessions_root, name);
+	if (!Glib::file_test (Glib::build_filename (dir, name + statefile_suffix), Glib::FILE_TEST_IS_REGULAR)) {
+		return error_reply ("no such session");
+	}
+	if (!remove_tree (dir)) {
+		return error_reply ("the session could not be removed");
+	}
+
+	return "{\"ok\":true}";
+}
+
+/* A copy of the session under another name.  include_media is always true and
+ * switch_to is always false: those two together are the branch of
+ * Session::save_as() that needs no unload/reload of the session, which is the
+ * only one a phone can do without losing the engine for a second.  With
+ * copy_media false the new session references the audio in the old folder -
+ * fast, and what the flag means in Ardour, but the old folder must then stay.
+ */
+static std::string
+m_session_save_as (Params& p)
+{
+	std::string e = require_session ();
+	if (!e.empty ()) {
+		return e;
+	}
+
+	std::string const name = p["name"];
+	if (!valid_session_name (name)) {
+		return error_reply ("invalid session name");
+	}
+	if (name == session->name ()) {
+		return error_reply ("that is the session's name already");
+	}
+	if (Glib::file_test (Glib::build_filename (sessions_root, name), Glib::FILE_TEST_EXISTS)) {
+		return error_reply ("a session with that name exists");
+	}
+	if (session->transport_rolling ()) {
+		return error_reply ("stop the transport before saving as");
+	}
+	if (session->actively_recording ()) {
+		return error_reply ("stop recording before saving as");
+	}
+
+	Session::SaveAs sa;
+	sa.new_parent_folder = sessions_root;
+	sa.new_name         = name;
+	sa.switch_to        = false;
+	sa.include_media    = true;
+	sa.copy_media       = p.count ("copy_media") && truthy (p["copy_media"]);
+	sa.copy_external    = false;
+
+	if (session->save_as (sa) != 0) {
+		return error_reply (sa.failure_message.empty () ? "saving a copy failed" : sa.failure_message);
+	}
+
+	std::string j = "{\"ok\":true,\"name\":" + q (name);
+	j += ",\"path\":" + q (sa.final_session_folder_name);
+	j += ",\"copied_media\":" + std::string (sa.copy_media ? "true" : "false");
+	j += "}";
+	return j;
+}
+
+static std::string
+m_session_templates ()
+{
+	std::vector<TemplateInfo> templates;
+	find_session_templates (templates, true);
+	std::sort (templates.begin (), templates.end ());
+
+	std::string j = "{\"ok\":true,\"templates\":[";
+	bool first = true;
+	for (auto const& t : templates) {
+		j += (first ? "" : ",") + std::string ("{\"name\":") + q (t.name);
+		j += ",\"description\":" + q (t.description);
+		j += "}";
+		first = false;
+	}
+	j += "]}";
+	return j;
+}
+
+/* Save the open session as a template, so that the next session can start with
+ * these tracks, this routing and this plugin set already in place. */
+static std::string
+m_session_save_template (Params& p)
+{
+	std::string e = require_session ();
+	if (!e.empty ()) {
+		return e;
+	}
+
+	std::string const name = p["name"].empty () ? session->name () : p["name"];
+	if (!valid_session_name (name)) {
+		return error_reply ("invalid template name");
+	}
+
+	std::string path;
+	bool const exists = find_session_template (name, path);
+
+	/* replace_existing, because the phone has no dialog to ask with: a second
+	 * "save as template" with the same name means "this one instead" */
+	if (session->save_template (name, p["description"], true) != 0) {
+		return error_reply ("saving the template failed");
+	}
+
+	std::string j = "{\"ok\":true,\"name\":" + q (name);
+	j += std::string (",\"replaced\":") + (exists ? "true" : "false");
+	j += "}";
+	return j;
+}
+
+static std::string
+m_session_delete_template (Params& p)
+{
+	std::string const name = p["name"];
+	if (!valid_session_name (name)) {
+		return error_reply ("invalid template name");
+	}
+
+	std::string path;
+	if (!find_session_template (name, path)) {
+		return error_reply ("no such session template: " + name);
+	}
+
+	/* the search path also finds the templates shipped with the application;
+	 * those live in read-only assets and are not the user's to delete */
+	std::string const user_dir = user_template_directory ();
+	if (path.compare (0, user_dir.size (), user_dir) != 0) {
+		return error_reply ("that template came with the application");
+	}
+
+	/* a template is a directory holding a .template file and the session state
+	 * it was made from; there is nothing to unlink one at a time */
+	if (!remove_tree (path)) {
+		return error_reply ("the template could not be removed");
+	}
+
 	return "{\"ok\":true}";
 }
 
@@ -795,12 +1150,6 @@ m_tracks_add (Params& p)
 /* ---------------------------------------------------------------------------
  * mixer
  */
-
-static bool
-truthy (std::string const& v)
-{
-	return v == "true" || v == "1";
-}
 
 static bool
 by_order (std::shared_ptr<Route> const& a, std::shared_ptr<Route> const& b)
@@ -3481,6 +3830,13 @@ dispatch (std::string const& method, Params& p)
 	if (method == "session.create")  return m_session_create (p);
 	if (method == "session.open")    return m_session_open (p);
 	if (method == "session.save")    return m_session_save ();
+	if (method == "session.info")    return m_session_info ();
+	if (method == "session.rename")  return m_session_rename (p);
+	if (method == "session.delete")  return m_session_delete (p);
+	if (method == "session.save_as") return m_session_save_as (p);
+	if (method == "session.templates")     return m_session_templates ();
+	if (method == "session.save_template") return m_session_save_template (p);
+	if (method == "session.delete_template") return m_session_delete_template (p);
 	if (method == "session.close")   { close_session (); return status_json (); }
 	if (method == "transport.play")  return m_transport (true);
 	if (method == "transport.stop")  return m_transport (false);

@@ -40,7 +40,22 @@ main { flex: 1; min-height: 0; min-width: 0; display: flex; }
 .view { display: none; flex: 1; min-width: 0; overflow: hidden; flex-direction: column; gap: 8px; min-height: 0; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px; }
 .view.active { display: flex; }
 ul { list-style: none; padding: 0; margin: 4px 0; }
-#session-list li { padding: 6px 0; border-bottom: 1px solid var(--line); display: flex; justify-content: space-between; align-items: center; }
+#session-list li { padding: 6px 0; border-bottom: 1px solid var(--line); display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+/* the session the engine has loaded, and the row that is being renamed or
+ * deleted: both have to be obvious without a dialog to confirm anything */
+#session-list li.open { background: linear-gradient(90deg, rgba(91,141,239,.14), transparent 60%); }
+#session-list li.confirm { background: linear-gradient(90deg, rgba(255,138,101,.14), transparent 60%); }
+.session-what { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.session-title { font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-meta { font-size: 11px; color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-buttons { display: flex; gap: 4px; flex: none; }
+#session-list button { padding: 5px 8px; font-size: 12px; }
+.session-rename { flex: 1; min-width: 0; }
+.check { display: flex; align-items: center; gap: 4px; font-size: 12px; color: var(--dim); }
+.check input { flex: none; width: auto; min-width: 0; }
+/* .row and form are display:flex, which wins over the hidden attribute */
+#save-as-form[hidden] { display: none; }
+#save-as-form .hint { flex: 1 0 100%; }
 .hint { color: var(--dim); font-size: 12px; margin: 0; }
 #message { color: var(--hot); min-height: 1.4em; margin: 0; }
 

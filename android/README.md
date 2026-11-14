@@ -36,8 +36,8 @@ returns one JSON object.  The methods are implemented in
 
 | Family | Methods |
 | --- | --- |
-| engine | `engine.status` |
-| session | `session.list`, `session.create`, `session.open`, `session.save`, `session.close` |
+| engine | `engine.status`, `engine.buffer` |
+| session | `session.list`, `session.create`, `session.open`, `session.save`, `session.close`, `session.info`, `session.rename`, `session.delete`, `session.save_as`, `session.templates`, `session.save_template`, `session.delete_template` |
 | transport | `transport.play`, `transport.stop`, `transport.state`, `transport.record`, `transport.locate` |
 | tracks / buses | `tracks.list`, `tracks.add`, `tracks.remove`, `buses.add` |
 | mixer | `mixer.strips`, `strip.set` |
@@ -89,28 +89,33 @@ Verified by CI (`.github/workflows/build.yml`, jobs `android`, `android-apk`,
   NDK and the cross-compiled dependency stack;
 * the APK contains `lib/<abi>/libardour.so`, `lib/<abi>/libardour_android.so`
   and `assets/web/index.html`;
-* on an **API 30 x86_64 emulator**, `SmokeTest.kt` starts the engine, creates a
-  session, adds tracks and regions, rolls the transport and drives the mixer
-  and plugin panels entirely through the JSON protocol, then the frontend's
-  editor / mixer / piano-roll / plugin / automation views are checked and
-  screenshotted.  The run asserts `ARDOUR_SMOKE PASS` and the structured
-  `ARDOUR_UI ...` lines.
+* on **API 28 and API 30 x86_64 emulators**, `SmokeTest.kt` starts the engine,
+  creates a session, adds tracks and regions, rolls the transport and drives the
+  mixer and plugin panels entirely through the JSON protocol, then the
+  frontend's editor / mixer / piano-roll / plugin / automation views are checked
+  and screenshotted.  The run asserts `ARDOUR_SMOKE PASS` and the structured
+  lines: `ARDOUR_UI ...`, `ARDOUR_AUDIO ...`, `ARDOUR_EXPORT ...`,
+  `ARDOUR_EXPORT_ASYNC ...` (a render that can be cancelled while it runs),
+  `ARDOUR_SENDS ...`, `ARDOUR_SERVICE ...` (foreground, and the cpu kept awake
+  while the transport rolls), `ARDOUR_BUFFER ...` (a block size change and back)
+  and `ARDOUR_SESSIONS ...` (describe, copy, rename, template, delete).
+* on an **arm64 phone** (Redmi Note 9, Android 12) the same smoke test passes
+  with the engine on AAudio, which is what `tools/android/device-check.sh`
+  automates.
 
 **Not verified yet** - do not read more into the above than it says:
 
 * **audio output.**  The emulator job runs with `-noaudio`, so the AAudio
   stream is never opened there; whether sound actually comes out of a device
-  is untested.
-* **arm64 phones.**  Everything above ran on the x86_64 emulator; the arm64
-  library is built and packaged but has not been run on hardware.
+  is untested.  The arm64 run opened a real stream and moved the meters, and
+  AudioFlinger reported underruns - but nobody has listened to it.
 * **real devices / real audio hardware**: USB and Bluetooth devices, sample
   rate changes, xruns, and the latency the AAudio backend asks for.
 * **MIDI from real hardware** (`midi.send` exists; the input path is newer than
   the emulator coverage).
-* API levels **below 30**: the AAudio device *enumeration* only exists from
-  API 30 on and the code falls back to the default devices below that; the
-  emulator job runs API 30 only, so the fallback has not been exercised
-  (`minSdk` is 28).
+* API levels **below 28** (`minSdk` is 28): the AAudio device *enumeration*
+  only exists from API 30 on and the code falls back to the default devices
+  below that.  API 28 is exercised by CI; the fallback path is what it takes.
 
 `tools/android/device-check.sh` is the starting point for the real-device
 work: it installs the APK, runs the same engine startup and protocol smoke

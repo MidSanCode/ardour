@@ -33,13 +33,24 @@
   <h2>Sessions</h2>
   <form id="create">
     <input id="new-name" placeholder="new session name" autocomplete="off" required>
+    <select id="new-template" title="Start the new session from a template"></select>
     <button type="submit">Create</button>
   </form>
   <ul id="session-list"></ul>
+  <p id="session-info" class="hint"></p>
   <div class="row">
     <button id="save" disabled>Save</button>
     <button id="close" disabled>Close</button>
+    <button id="save-as" disabled title="Write a copy under another name">Save a copy</button>
+    <button id="save-template" disabled title="Keep this session's tracks and routing as a template">Save as template</button>
   </div>
+  <form id="save-as-form" hidden>
+    <input id="save-as-name" placeholder="name for the copy" autocomplete="off" required>
+    <label class="check"><input type="checkbox" id="save-as-media"> copy the audio</label>
+    <button type="submit">Make the copy</button>
+    <button type="button" id="save-as-cancel">Cancel</button>
+    <p class="hint">Without "copy the audio" the copy points at the audio in this session's folder, which is instant - but deleting this session then takes the audio with it.</p>
+  </form>
 
   <h2>Engine</h2>
   <div class="row">

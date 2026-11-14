@@ -759,12 +759,20 @@ object SmokeTest {
         val current = before.getInt("samples")
         val backend = call(host, "engine.status").optString("backend")
 
+        /* A neighbour of the current size, not the smallest one in the list:
+         * the reason the setting exists is "a bigger block survives a busy
+         * phone", and 128 samples proves the call works without proving
+         * anything anyone would ever do with it. */
         var other = 0
         for (i in 0 until sizes.length()) {
-            val n = sizes.getInt(i)
-            if (n != current) {
-                other = n
-                break
+            if (sizes.getInt(i) == current * 2) other = current * 2
+        }
+        if (other == 0) {
+            for (i in sizes.length() - 1 downTo 0) {
+                if (sizes.getInt(i) != current) {
+                    other = sizes.getInt(i)
+                    break
+                }
             }
         }
         if (sizes.length() == 0 || other == 0) {
@@ -835,7 +843,92 @@ object SmokeTest {
         call(host, "session.close")
         val list = call(host, "session.list").getJSONArray("sessions")
         var found = false
-        for (i in 0 until list.length()) if (list.getString(i) == name) found = true
+        for (i in 0 until list.length()) {
+            if (list.getJSONObject(i).getString("name") == name) found = true
+        }
         if (!found) throw IllegalStateException("the saved session is not listed")
+
+        checkSessionManagement(host, name)
+    }
+
+    /**
+     * The session list is the phone's file manager: without it the only way to
+     * get rid of a session is to clear the app's data, which takes the others
+     * with it.  So: describe one, copy it, rename it, start one from a template,
+     * and delete them again - including the two refusals that matter, because
+     * this is a rm -rf with no trash behind it.
+     */
+    private fun checkSessionManagement(host: EngineHost, name: String) {
+        call(host, "session.open", JSONObject().put("name", name))
+
+        val info = call(host, "session.info")
+        if (!info.getBoolean("ok")) fail("the session cannot be described: $info")
+        if (info.getString("name") != name) fail("the session is called ${info.getString("name")}")
+        if (info.getLong("bytes") <= 0) fail("the session takes no room on disk: $info")
+        if (info.getInt("tracks") != 1) fail("the session has ${info.getInt("tracks")} tracks, expected 1")
+
+        val template = "smoke-template"
+        val saved = call(host, "session.save_template",
+            JSONObject().put("name", template).put("description", "one track"))
+        if (!saved.getBoolean("ok")) fail("the template was not saved: $saved")
+        val templates = call(host, "session.templates").getJSONArray("templates")
+        var haveTemplate = false
+        for (i in 0 until templates.length()) {
+            if (templates.getJSONObject(i).getString("name") == template) haveTemplate = true
+        }
+        if (!haveTemplate) fail("the template is not listed: $templates")
+
+        /* a session started from the template has to have the track the
+         * template was made from - that is the whole point of a template */
+        val fromTemplate = "$name-tpl"
+        call(host, "session.create", JSONObject().put("name", fromTemplate).put("template", template))
+        val tplTracks = call(host, "tracks.list").getJSONArray("tracks").length()
+        if (tplTracks != 1) fail("the session made from the template has $tplTracks tracks, expected 1")
+
+        call(host, "session.open", JSONObject().put("name", name))
+        val copy = "$name-copy"
+        val made = call(host, "session.save_as", JSONObject().put("name", copy).put("copy_media", false))
+        if (!made.getBoolean("ok")) fail("the session could not be copied: $made")
+        if (made.getBoolean("copied_media")) fail("copy_media=false copied the media anyway: $made")
+
+        val renamed = "$name-ren"
+        val rn = call(host, "session.rename", JSONObject().put("name", renamed))
+        if (!rn.getBoolean("ok")) fail("the session could not be renamed: $rn")
+        val afterRename = call(host, "session.info")
+        if (afterRename.getString("name") != renamed) {
+            fail("the session is still called ${afterRename.getString("name")}")
+        }
+
+        var refusals = 0
+        val refuseOpen = call(host, "session.delete", JSONObject().put("name", renamed).put("confirm", renamed))
+        if (refuseOpen.getBoolean("ok")) fail("the open session was deleted")
+        refusals++
+
+        call(host, "session.save")
+        call(host, "session.close")
+
+        val wrongName = call(host, "session.delete", JSONObject().put("name", renamed).put("confirm", "nope"))
+        if (wrongName.getBoolean("ok")) fail("deleting without the name repeated back was allowed")
+        refusals++
+
+        val gone = call(host, "session.delete", JSONObject().put("name", "$name-gone").put("confirm", "$name-gone"))
+        if (gone.getBoolean("ok")) fail("a session that does not exist was deleted")
+        refusals++
+
+        for (n in listOf(renamed, copy, fromTemplate)) {
+            val r = call(host, "session.delete", JSONObject().put("name", n).put("confirm", n))
+            if (!r.getBoolean("ok")) fail("$n could not be deleted: $r")
+        }
+        val goneTemplate = call(host, "session.delete_template", JSONObject().put("name", template))
+        if (!goneTemplate.getBoolean("ok")) fail("the template could not be removed: $goneTemplate")
+
+        val left = call(host, "session.list").getJSONArray("sessions")
+        for (i in 0 until left.length()) {
+            val n = left.getJSONObject(i).getString("name")
+            if (n == renamed || n == copy || n == fromTemplate) fail("$n is still listed after deleting it")
+        }
+
+        Log.i(TAG, "ARDOUR_SESSIONS bytes=${info.getLong("bytes")} template=$template " +
+                   "copy=$copy rename=$renamed refused=$refusals")
     }
 }
