@@ -88,11 +88,20 @@
  *                                         id, name; and the one used by default
  *   export.audio     {preset?, start?, end?, folder?, name?}
  *                                         renders the master bus through libardour's
- *                                         freewheel export; without a range it exports
- *                                         from the start to the last region's end, and
- *                                         without a folder it writes into <cache>/export.
- *                                         Replies with folder, seconds and the files that
- *                                         appeared: path, name, bytes
+ *                                         freewheel export and WAITS for it; without a
+ *                                         range it exports from the start to the last
+ *                                         region's end, and without a folder it writes
+ *                                         into <cache>/export.  Replies with folder,
+ *                                         seconds and the files that appeared.
+ *   export.start     {preset?, start?, end?, folder?, name?}
+ *                                         the same, but returns at once: the render is
+ *                                         watched on a thread of its own, so the engine
+ *                                         thread (the one the UI talks to) stays free
+ *   export.status                         running, finished, succeeded, cancelled,
+ *                                         progress 0..1, seconds, folder, files
+ *   export.cancel                         aborts the running export; it still has to
+ *                                         be polled until finished, which is when the
+ *                                         transport leaves freewheel
  *
  * All engine work happens on one thread owned by this module, which carries
  * the event loop and the session event pool libardour expects of a "GUI"

@@ -45,7 +45,9 @@
   <form id="export-form" class="row">
     <select id="export-preset" title="The format and settings to export with"></select>
     <button type="submit" id="export-run" disabled>Export mix</button>
+    <button type="button" id="export-cancel" hidden>Cancel</button>
   </form>
+  <progress id="export-progress" max="1" value="0" hidden></progress>
   <ul id="export-files"></ul>
   <p class="hint">Export renders the session's master bus between the start and the last region, into the folder below. On a phone the file has to be saved somewhere you can reach it.</p>
 </section>

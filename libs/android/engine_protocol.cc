@@ -17,6 +17,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <atomic>
 #include <condition_variable>
 #include <deque>
 #include <exception>
@@ -26,6 +27,7 @@
 #include <memory>
 #include <mutex>
 #include <set>
+#include <thread>
 #include <vector>
 
 #include <cstring>
@@ -408,6 +410,22 @@ run_on_engine_thread (Job const& job)
 	queue_cond.notify_all ();
 	queue_cond.wait (lm, [&r] { return r->done; });
 	return r->reply;
+}
+
+/* The same queue, but nobody waits for the reply: for work that has to happen
+ * on the engine thread and that the caller has no reason to block on (the
+ * export's clean-up, once its own thread has seen the render stop).  The
+ * engine thread always exists by then - the caller is a thread that an
+ * earlier request started.
+ */
+static void
+post_to_engine_thread (Job const& job)
+{
+	std::shared_ptr<Request> r (new Request (job));
+	std::lock_guard<std::mutex> lm (queue_lock);
+	r->done = true;
+	queue.push_back (r);
+	queue_cond.notify_all ();
 }
 
 /* ---------------------------------------------------------------------------
@@ -2455,8 +2473,117 @@ export_files_json (std::string const& folder, gint64 since)
 	return j;
 }
 
+/* ---------------------------------------------------------------------------
+ * export: start it, watch it, report on it
+ *
+ * Rendering the master bus takes as long as the material does, and the engine
+ * thread is also the thread the UI talks to - dispatch() runs on it.  Waiting
+ * for the render inside dispatch() therefore froze the whole app for its
+ * duration: a two second test file hid it, a five minute mixdown would not.
+ * So the export is started here, watched from a thread of its own, and
+ * reported on by polling export.status.  export.audio keeps the blocking
+ * behaviour for the smoke test, which wants the finished file list back.
+ */
+
+struct ExportJob {
+	std::shared_ptr<SimpleExport> exporter;
+	ExportStatusPtr               status;
+	std::string                   folder;
+	std::string                   preset;
+	std::string                   name;
+	samplepos_t                   start;
+	samplepos_t                   end;
+	gint64                        started_wall;
+	bool                          async;
+	std::atomic<bool>             rendered;
+	std::atomic<bool>             finished;
+	bool                          ok;
+	std::string                   error;
+	std::string                   files;
+	double                        seconds;
+
+	ExportJob ()
+		: start (0), end (0), started_wall (0), async (false)
+		, rendered (false), finished (false), ok (false), seconds (0) {}
+};
+
+static std::mutex                 export_lock;
+static std::shared_ptr<ExportJob> export_job;
+static bool                       export_cancel = false;
+
+/* Runs on the engine thread, the way the desktop calls it from its GUI thread
+ * when the export's Finished signal arrives.  It is what takes the transport
+ * out of freewheel, so it must happen exactly once per job. */
+static void
+finish_export (std::shared_ptr<ExportJob> const& job)
+{
+	job->status->finish (TRS_UI);
+
+	job->ok = !job->status->aborted () && !job->status->errors ();
+	if (job->ok) {
+		job->files = export_files_json (job->folder, job->started_wall - 1);
+		if (job->files.empty ()) {
+			job->ok    = false;
+			job->error = "the export wrote no file into " + job->folder;
+		}
+	} else {
+		job->error = "the export failed";
+	}
+
+	{
+		std::lock_guard<std::mutex> lm (export_lock);
+		export_cancel = false;
+	}
+	job->finished = true;
+}
+
+/* Runs on a thread of its own.  It only reads the status, which libardour
+ * updates from the export thread; the clean-up goes back to the engine
+ * thread because that is where libardour expects it.
+ */
+static void
+export_watch (std::shared_ptr<ExportJob> job)
+{
+	long waited = 0;
+
+	while (job->status->running ()) {
+		{
+			std::lock_guard<std::mutex> lm (export_lock);
+			if (export_cancel) {
+				job->status->abort ();
+			}
+		}
+		if (job->status->aborted () || job->status->errors ()) {
+			break;
+		}
+		Glib::usleep (10000);
+		waited += 10;
+		if (waited > 1800000) {
+			/* half an hour: a range this long at real time means something
+			 * is wrong, and the transport must not be left freewheeling */
+			job->status->abort ();
+			break;
+		}
+	}
+
+	job->rendered = true;
+
+	if (!job->async) {
+		/* the caller is sitting on the engine thread waiting for this, so
+		 * posting the clean-up back to that thread would deadlock */
+		return;
+	}
+
+	post_to_engine_thread ([job] () {
+		finish_export (job);
+		return std::string ();
+	});
+}
+
+/* Start the export on the engine thread and return at once.  On failure the
+ * returned string is an error reply and nothing is left running. */
 static std::string
-m_export_audio (Params& p)
+begin_export (Params& p, std::shared_ptr<ExportJob>& job, bool async)
 {
 	std::string e = require_session ();
 	if (!e.empty ()) {
@@ -2464,6 +2591,13 @@ m_export_audio (Params& p)
 	}
 	if (session->transport_rolling ()) {
 		return error_reply ("stop the transport before exporting");
+	}
+
+	{
+		std::lock_guard<std::mutex> lm (export_lock);
+		if (export_job && !export_job->finished) {
+			return error_reply ("an export is already running");
+		}
 	}
 
 	samplepos_t start = param_samples (p, "start", 0);
@@ -2495,61 +2629,154 @@ m_export_audio (Params& p)
 	/* whole seconds, the resolution of the file timestamps compared below */
 	gint64 const started = g_get_real_time () / 1000000;
 
-	SimpleExport exporter;
-	exporter.set_session (session);
-	exporter.set_name (name);
-	exporter.set_folder (folder);
-	exporter.set_range (start, end);
-	if (!p["preset"].empty () && !exporter.set_preset (p["preset"])) {
+	job = std::make_shared<ExportJob> ();
+	job->async    = async;
+	job->exporter = std::make_shared<SimpleExport> ();
+	job->exporter->set_session (session);
+	job->exporter->set_name (name);
+	job->exporter->set_folder (folder);
+	job->exporter->set_range (start, end);
+	if (!p["preset"].empty () && !job->exporter->set_preset (p["preset"])) {
+		job.reset ();
 		return error_reply ("no such export preset: " + p["preset"]);
 	}
-	if (!exporter.check_outputs ()) {
+	if (!job->exporter->check_outputs ()) {
+		job.reset ();
 		return error_reply ("the master bus has no outputs to export");
 	}
 
-	ExportStatusPtr status = session->get_export_status ();
-	if (!exporter.run_export ()) {
+	job->status = session->get_export_status ();
+	if (!job->exporter->run_export ()) {
+		job.reset ();
 		return error_reply ("the export did not start");
 	}
 
-	long waited = 0;
-	while (status->running ()) {
-		if (status->aborted () || status->errors ()) {
-			break;
-		}
-		Glib::usleep (10000);
-		waited += 10;
-		if (waited > 1800000) {
-			/* half an hour: a range this long at real time means something
-			 * is wrong, and the transport must not be left freewheeling */
-			status->abort ();
-			break;
-		}
-	}
-	bool const timed_out = waited > 1800000;
-
-	status->finish (TRS_UI);
-
-	if (timed_out) {
-		return error_reply ("the export did not finish");
-	}
-	if (status->aborted () || status->errors ()) {
-		return error_reply ("the export failed");
-	}
-
-	std::string const files = export_files_json (folder, started - 1);
-	if (files.empty ()) {
-		return error_reply ("the export wrote no file into " + folder);
-	}
-
+	job->folder       = folder;
+	job->preset       = job->exporter->preset_uuid ();
+	job->name         = name;
+	job->start        = start;
+	job->end          = end;
+	job->started_wall = started;
 	double const rate = session->sample_rate ();
-	std::string  j    = "{\"ok\":true";
-	j += ",\"folder\":" + q (folder);
-	j += ",\"preset\":" + q (exporter.preset_uuid ());
-	j += ",\"start\":" + std::to_string ((long long) start);
-	j += ",\"end\":" + std::to_string ((long long) end);
-	j += ",\"seconds\":" + num (rate > 0 ? (end - start) / rate : 0);
-	j += ",\"files\":[" + files + "]}";
+	job->seconds      = rate > 0 ? (end - start) / rate : 0;
+
+	{
+		std::lock_guard<std::mutex> lm (export_lock);
+		export_job    = job;
+		export_cancel = false;
+	}
+
+	std::thread (export_watch, job).detach ();
+	return std::string ();
+}
+
+/* The state of the current export, in the shape the frontend polls. */
+static std::string
+export_json (std::shared_ptr<ExportJob> const& job, bool include_files)
+{
+	double progress = 0;
+	samplecnt_t const total = job->status->total_samples;
+	if (total > 0) {
+		progress = (double) job->status->processed_samples / (double) total;
+	}
+	if (progress > 1) {
+		progress = 1;
+	}
+
+	std::string j = "{\"ok\":true";
+	j += std::string (",\"running\":") + (job->status->running () ? "true" : "false");
+	j += std::string (",\"finished\":") + (job->finished ? "true" : "false");
+	j += std::string (",\"cancelled\":") + (job->status->aborted () ? "true" : "false");
+	j += ",\"folder\":" + q (job->folder);
+	j += ",\"preset\":" + q (job->preset);
+	j += ",\"start\":" + std::to_string ((long long) job->start);
+	j += ",\"end\":" + std::to_string ((long long) job->end);
+	j += ",\"seconds\":" + num (job->seconds);
+	j += ",\"progress\":" + num (progress);
+
+	if (job->finished) {
+		j += std::string (",\"succeeded\":") + (job->ok ? "true" : "false");
+		if (!job->error.empty ()) {
+			j += ",\"error\":" + q (job->error);
+		}
+		if (include_files && !job->files.empty ()) {
+			j += ",\"files\":[" + job->files + "]";
+		}
+	}
+	j += "}";
+	return j;
+}
+
+static std::string
+m_export_start (Params& p)
+{
+	std::shared_ptr<ExportJob> job;
+	std::string e = begin_export (p, job, true);
+	if (!e.empty ()) {
+		return e;
+	}
+	return export_json (job, false);
+}
+
+static std::string
+m_export_status ()
+{
+	std::shared_ptr<ExportJob> job;
+	{
+		std::lock_guard<std::mutex> lm (export_lock);
+		job = export_job;
+	}
+	if (!job) {
+		return "{\"ok\":true,\"none\":true,\"running\":false,\"finished\":false}";
+	}
+	return export_json (job, true);
+}
+
+static std::string
+m_export_cancel ()
+{
+	std::shared_ptr<ExportJob> job;
+	{
+		std::lock_guard<std::mutex> lm (export_lock);
+		job = export_job;
+		if (job && !job->finished) {
+			export_cancel = true;
+		}
+	}
+	if (!job) {
+		return error_reply ("there is no export to cancel");
+	}
+	return export_json (job, false);
+}
+
+/* The blocking form: start it, wait for the render, clean up here (the engine
+ * thread) and answer with the file list.  The smoke test uses this. */
+static std::string
+m_export_audio (Params& p)
+{
+	std::shared_ptr<ExportJob> job;
+	std::string e = begin_export (p, job, false);
+	if (!e.empty ()) {
+		return e;
+	}
+
+	while (!job->rendered) {
+		Glib::usleep (10000);
+	}
+
+	finish_export (job);
+
+	if (!job->ok) {
+		return error_reply (job->error);
+	}
+
+	std::string j = "{\"ok\":true";
+	j += ",\"folder\":" + q (job->folder);
+	j += ",\"preset\":" + q (job->preset);
+	j += ",\"start\":" + std::to_string ((long long) job->start);
+	j += ",\"end\":" + std::to_string ((long long) job->end);
+	j += ",\"seconds\":" + num (job->seconds);
+	j += ",\"files\":[" + job->files + "]}";
 	return j;
 }
 
@@ -3007,6 +3234,9 @@ dispatch (std::string const& method, Params& p)
 	if (method == "transport.locate") return m_transport_locate (p);
 	if (method == "export.presets")  return m_export_presets ();
 	if (method == "export.audio")    return m_export_audio (p);
+	if (method == "export.start")    return m_export_start (p);
+	if (method == "export.status")   return m_export_status ();
+	if (method == "export.cancel")   return m_export_cancel ();
 	if (method == "tempo.get")       return m_musical ();
 	if (method == "tempo.set")       return m_tempo_set (p);
 	if (method == "meter.set")       return m_meter_set (p);

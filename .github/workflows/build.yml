@@ -1317,6 +1317,11 @@ jobs:
             grep 'ARDOUR_EXPORT' logcat.txt
             grep -E 'ARDOUR_EXPORT file=.*\.wav bytes=[1-9][0-9]* rate=44100 channels=2 bits=16 seconds=2\.0[0-9]* peak=(0\.[0-9]*[1-9]|1\.000)' logcat.txt
 
+            # the same render again, but through export.start / export.status,
+            # which is the path the app uses: the engine has to answer while it
+            # renders, and a long render has to be cancellable
+            grep -E 'ARDOUR_EXPORT_ASYNC polls=[0-9]+ max_roundtrip=[0-9]+ms cancelled=true' logcat.txt
+
             # --- the musical timeline ---------------------------------------------
             # The smoke test changes the tempo to 96 and the meter to 3/4, asks
             # for the bar grid and checks that a bar is three quarter notes long

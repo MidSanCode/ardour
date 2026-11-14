@@ -132,6 +132,7 @@
 
   function afterSessionChange(st) {
     applyStatus(st);
+    stopExportPoll();
     $('export-files').innerHTML = '';
     if (state.session) {
       showView('editor');
@@ -250,16 +251,62 @@
     });
   }
 
+  /* The render happens in the engine and can take minutes, so it is started
+   * and then polled: the app stays usable while the mixdown is written, and
+   * a long one can be cancelled. */
+  var exportPoll = null;
+
+  function stopExportPoll() {
+    if (exportPoll) { clearInterval(exportPoll); exportPoll = null; }
+    $('export-cancel').hidden = true;
+    $('export-progress').hidden = true;
+  }
+
+  function startExportPoll() {
+    if (exportPoll) return;
+    $('export-cancel').hidden = false;
+    $('export-progress').hidden = false;
+    exportPoll = setInterval(function () {
+      call('export.status').then(function (r) {
+        if (!r.ok) { stopExportPoll(); $('export-run').disabled = false; message(r.error); return; }
+        if (r.none) { stopExportPoll(); $('export-run').disabled = false; return; }
+        $('export-progress').value = r.progress || 0;
+        if (!r.finished) return;
+        stopExportPoll();
+        $('export-run').disabled = false;
+        if (r.succeeded) {
+          message('exported ' + r.seconds.toFixed(1) + ' s into ' + r.folder);
+          showExportFiles(r);
+        } else if (r.cancelled) {
+          message('the export was cancelled');
+        } else {
+          message(r.error || 'the export failed');
+        }
+      }).catch(function () { stopExportPoll(); $('export-run').disabled = false; });
+    }, 300);
+  }
+
   $('export-form').onsubmit = function (e) {
     e.preventDefault();
     if (!state.session) return;
     $('export-files').innerHTML = '';
     $('export-run').disabled = true;
     message('exporting…');
-    call('export.audio', { preset: $('export-preset').value }).then(checked).then(function (r) {
-      message('exported ' + r.seconds.toFixed(1) + ' s into ' + r.folder);
-      showExportFiles(r);
-    }).catch(ignore).then(function () { $('export-run').disabled = false; });
+    call('export.start', { preset: $('export-preset').value }).then(function (r) {
+      if (!r.ok) {
+        $('export-run').disabled = false;
+        message(r.error || 'the export did not start');
+        return;
+      }
+      startExportPoll();
+    }).catch(function () { $('export-run').disabled = false; });
+  };
+
+  $('export-cancel').onclick = function () {
+    $('export-cancel').disabled = true;
+    call('export.cancel').then(function () { message('cancelling…'); }).catch(ignore).then(function () {
+      setTimeout(function () { $('export-cancel').disabled = false; }, 1000);
+    });
   };
 
   /* ------------------------------------------------------------- transport */

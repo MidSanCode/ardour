@@ -47,7 +47,7 @@ returns one JSON object.  The methods are implemented in
 | plugins | `plugins.list`, `plugin.add`, `plugin.get`, `plugin.set`, `plugin.remove`, `plugin.presets`, `plugin.preset.load`, `plugin.preset.save` |
 | automation | `automation.get`, `automation.state`, `automation.add`, `automation.remove`, `automation.clear` |
 | editing | `edit.undo`, `edit.redo` |
-| export | `export.presets`, `export.audio` |
+| export | `export.presets`, `export.audio`, `export.start`, `export.status`, `export.cancel` |
 | musical timeline | `tempo.get`, `tempo.set`, `meter.set`, `loop.set`, `loop.clear`, `click.set`, `grid` |
 | markers | `markers.list`, `marker.add`, `marker.move`, `marker.remove` |
 | meters / MIDI | `meters`, `midi.send` |

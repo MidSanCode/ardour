@@ -173,6 +173,12 @@ ul { list-style: none; padding: 0; margin: 4px 0; }
  * panel, where overflow:hidden cuts it in half (seen on a 1080px phone) */
 .vel-label { flex: none; font-size: 11px; color: #aaa; align-self: center; }
 
+/* the export runs in the engine and is polled, so it needs a visible bar */
+progress { width: 100%; height: 8px; appearance: none; border: 0; border-radius: 4px; background: #0e1013; }
+progress::-webkit-progress-bar { background: #0e1013; border-radius: 4px; }
+progress::-webkit-progress-value { background: var(--accent); border-radius: 4px; }
+progress[hidden] { display: none; }
+
 /* ---- phones --------------------------------------------------------------
  * A 1080x2340 phone is about 390 CSS px wide, so the editor's three tool bars
  * wrap into eight rows and leave the timeline - the one thing the view exists

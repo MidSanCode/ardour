@@ -463,6 +463,62 @@ object SmokeTest {
         Log.i(TAG, "ARDOUR_EXPORT file=${file.name} bytes=${file.length()} rate=$sampleRate " +
                    "channels=$channels bits=$bits seconds=${"%.3f".format(seconds)} " +
                    "peak=${"%.3f".format(peak / 32767.0)}")
+
+        checkAsyncExport(host, folder, cd, rate)
+    }
+
+    /**
+     * The same render, through export.start / export.status instead of the
+     * blocking export.audio.
+     *
+     * The point of the split is that the engine thread is the thread the UI
+     * talks to: waiting for a render inside a request froze the app for its
+     * whole duration.  What can be checked from here is the state machine the
+     * frontend polls - it has to start, report progress, finish, and hand back
+     * the file - plus how long the engine took to answer while rendering.
+     */
+    private fun checkAsyncExport(host: EngineHost, folder: File, preset: String, rate: Long) {
+        val params = JSONObject().put("folder", folder.absolutePath)
+            .put("start", 0).put("end", 2 * rate).put("name", "async").put("preset", preset)
+        val started = call(host, "export.start", params)
+        if (!started.getBoolean("ok")) fail("the export did not start: $started")
+
+        var polls = 0
+        var maxRoundTrip = 0L
+        var reply = started
+        while (true) {
+            val t0 = System.nanoTime()
+            val s = call(host, "export.status")
+            val dt = (System.nanoTime() - t0) / 1000000
+            if (dt > maxRoundTrip) maxRoundTrip = dt
+            reply = s
+            if (s.getBoolean("finished")) break
+            /* the engine must still answer while it renders: this call goes
+             * through the same queue the UI uses */
+            if (++polls > 600) fail("the export did not finish: $s")
+            Thread.sleep(50)
+        }
+        if (!reply.getBoolean("succeeded")) fail("the async export failed: $reply")
+        if (reply.getJSONArray("files").length() == 0) fail("the async export wrote no file: $reply")
+        if (maxRoundTrip > 5000) fail("the engine blocked for ${maxRoundTrip}ms during the export")
+
+        /* a finished job must not block the next one, and a long render has to
+         * be cancellable while it runs */
+        val long = JSONObject().put("folder", folder.absolutePath)
+            .put("start", 0).put("end", 120 * rate).put("name", "cancel").put("preset", preset)
+        val again = call(host, "export.start", long)
+        if (!again.getBoolean("ok")) fail("the export cannot be started again: $again")
+        val stop = call(host, "export.cancel")
+        if (!stop.getBoolean("ok")) fail("the export could not be cancelled: $stop")
+        var waited = 0
+        while (!call(host, "export.status").getBoolean("finished")) {
+            if (++waited > 400) fail("the cancelled export never finished")
+            Thread.sleep(50)
+        }
+        val cancelled = call(host, "export.status")
+        if (!cancelled.getBoolean("cancelled")) fail("the export was not cancelled: $cancelled")
+
+        Log.i(TAG, "ARDOUR_EXPORT_ASYNC polls=$polls max_roundtrip=${maxRoundTrip}ms cancelled=true")
     }
 
     /**
