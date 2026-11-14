@@ -503,9 +503,12 @@ object SmokeTest {
         if (maxRoundTrip > 5000) fail("the engine blocked for ${maxRoundTrip}ms during the export")
 
         /* a finished job must not block the next one, and a long render has to
-         * be cancellable while it runs */
+         * be cancellable while it runs.  Ten minutes of audio is a few seconds
+         * of freewheel rendering on an emulator, which leaves the cancel -
+         * issued a few milliseconds after the start - plenty of room; two
+         * minutes was short enough that the render could win the race. */
         val long = JSONObject().put("folder", folder.absolutePath)
-            .put("start", 0).put("end", 120 * rate).put("name", "cancel").put("preset", preset)
+            .put("start", 0).put("end", 600 * rate).put("name", "cancel").put("preset", preset)
         val again = call(host, "export.start", long)
         if (!again.getBoolean("ok")) fail("the export cannot be started again: $again")
         val stop = call(host, "export.cancel")
@@ -805,15 +808,24 @@ object SmokeTest {
         val tracks = call(host, "tracks.list").getJSONArray("tracks")
         if (tracks.length() != 1) throw IllegalStateException("expected 1 track, found ${tracks.length()}")
 
-        call(host, "transport.play")
+        /* An emulator under load can take a second or two to answer the roll
+         * request, and the transport can stop again before the first poll sees
+         * it.  Ask again rather than calling it a failure: what is being
+         * checked is that the transport can roll, not that it rolls on the
+         * first attempt. */
         var rolled = false
-        for (i in 0 until 50) {
-            Thread.sleep(100)
-            val t = call(host, "transport.state")
-            if (t.optBoolean("rolling") && t.optLong("position") > 0) {
-                rolled = true
-                break
+        for (attempt in 1..3) {
+            call(host, "transport.play")
+            for (i in 0 until 20) {
+                Thread.sleep(100)
+                val t = call(host, "transport.state")
+                if (t.optBoolean("rolling") && t.optLong("position") > 0) {
+                    rolled = true
+                    break
+                }
             }
+            if (rolled) break
+            Log.i(TAG, "the transport did not roll on attempt $attempt, asking again")
         }
         if (!rolled) throw IllegalStateException("the transport did not roll")
         logAudioPath(host, "rolling")

@@ -41,6 +41,19 @@ public:
 	virtual ~SimpleExport () {}
 
 	void set_session (ARDOUR::Session*);
+
+	/** Do everything up to starting the render, and return while it runs.
+	 *
+	 * run_export() below waits for the render and finishes it, which is what a
+	 * command line tool wants and what a UI thread must never do: the wait is
+	 * as long as the export.  A host with a thread of its own calls this, polls
+	 * ExportStatus, and calls finish_export() when the render stops.
+	 */
+	bool start_export ();
+	/** Leaves freewheel and reports whether the render was aborted.  Must be
+	 * called on the thread that drives the session. */
+	bool finish_export ();
+
 	bool run_export ();
 
 	void set_name (std::string const&);

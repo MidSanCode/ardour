@@ -145,6 +145,30 @@ SimpleExport::check_outputs () const
 bool
 SimpleExport::run_export ()
 {
+	if (!start_export ()) {
+		return false;
+	}
+
+	while (_status->running ()) {
+		GUIIdle ();
+		// TODO only sleep if GUI did not process any events
+		Glib::usleep (10000);
+	}
+
+	return finish_export ();
+}
+
+bool
+SimpleExport::finish_export ()
+{
+	_status->finish (TRS_UI);
+
+	return !_status->aborted ();
+}
+
+bool
+SimpleExport::start_export ()
+{
 	if (!_session || !check_outputs ()) {
 		return false;
 	}
@@ -219,13 +243,5 @@ SimpleExport::run_export ()
 		return false;
 	}
 
-	while (_status->running ()) {
-		GUIIdle ();
-		// TODO only sleep if GUI did not process any events
-		Glib::usleep (10000);
-	}
-
-	_status->finish (TRS_UI);
-
-	return !_status->aborted ();
+	return true;
 }

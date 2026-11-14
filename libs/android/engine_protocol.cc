@@ -2803,7 +2803,9 @@ static bool                       export_cancel = false;
 static void
 finish_export (std::shared_ptr<ExportJob> const& job)
 {
-	job->status->finish (TRS_UI);
+	/* leaves freewheel: this has to happen on the engine thread, which is
+	 * where finish_export() is called from in both the sync and async paths */
+	job->exporter->finish_export ();
 
 	job->ok = !job->status->aborted () && !job->status->errors ();
 	if (job->ok) {
@@ -2932,7 +2934,9 @@ begin_export (Params& p, std::shared_ptr<ExportJob>& job, bool async)
 	}
 
 	job->status = session->get_export_status ();
-	if (!job->exporter->run_export ()) {
+	/* start_export(), not run_export(): the latter waits for the render and
+	 * finishes it, which is the whole freeze this is here to avoid */
+	if (!job->exporter->start_export ()) {
 		job.reset ();
 		return error_reply ("the export did not start");
 	}
