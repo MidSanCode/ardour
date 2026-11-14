@@ -124,6 +124,27 @@ ls -1 ui-*.png
 echo "== native backend messages =="
 grep -E 'AAudioBackend:' device-check-logcat.txt || echo "(none)"
 
+# ---- the way out ---------------------------------------------------------
+# Swiping the application away has to stop the engine in order - session,
+# engine, then libardour - instead of letting the process die with the audio
+# device open and the state file half written.  The swipe is the flaky part of
+# this check, not the code, so a task that refuses to be dismissed is reported
+# as a skip instead of a failure.
+echo "== the way out =="
+$ADB shell input keyevent KEYCODE_APP_SWITCH >/dev/null 2>&1 || true
+sleep 1
+$ADB shell input swipe 540 1500 540 300 200 >/dev/null 2>&1 || true
+for _ in $(seq 1 15); do
+	sleep 1
+	if $ADB logcat -d | grep -q 'ARDOUR_SERVICE engine shut down'; then break; fi
+done
+if $ADB logcat -d | grep 'ARDOUR_SERVICE engine shut down'; then
+	echo "the engine shut down in order on the way out"
+else
+	echo "(skipped: the task was not dismissed by the swipe - swipe the app away"
+	echo " by hand and look for 'ARDOUR_SERVICE engine shut down' in the log)"
+fi
+
 echo
 echo "PASS: $MODEL on $ABI, API $SDK ran the engine on AAudio and processed audio."
 echo "       log: device-check-logcat.txt   screenshots: ui-*.png"

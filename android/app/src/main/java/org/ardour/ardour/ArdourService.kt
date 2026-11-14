@@ -14,9 +14,11 @@ import android.media.AudioFocusRequest
 import android.media.AudioManager
 import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
 import android.os.Process
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import org.json.JSONObject
 
 /**
  * Keeps the engine running while the application is not on screen.
@@ -31,12 +33,21 @@ import androidx.core.app.NotificationCompat
  * (a call, another player) the transport is stopped rather than left to fight
  * for the device, and unplugging headphones stops it too, which is what every
  * other audio application does.
+ *
+ * While the transport runs it also holds a partial wake lock.  An AAudio
+ * stream does keep the cpu awake by itself, but that is the audio framework's
+ * promise, made for as long as the stream is open - and the point of this lock
+ * is that the guarantee is ours: the transport being up is what has to keep
+ * the machine awake, not the presence of a stream.
  */
 class ArdourService : Service() {
 
     private var focusRequest: AudioFocusRequest? = null
     private var noisy: BroadcastReceiver? = null
     private var removed = false
+    private var watcher: Thread? = null
+
+    @Volatile private var watching = true
 
     private val engine: EngineHost
         get() = (application as ArdourApplication).engine
@@ -102,6 +113,55 @@ class ArdourService : Service() {
             registerReceiver(receiver, IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY))
         }
         noisy = receiver
+
+        watchTransport()
+    }
+
+    /**
+     * Holds the cpu awake for as long as the transport runs.
+     *
+     * The state is asked of the engine rather than pushed by the frontend:
+     * the WebView's timers are throttled when the application is in the
+     * background, which is exactly when the lock matters, so the service
+     * cannot depend on the page telling it anything.
+     */
+    private fun watchTransport() {
+        val power = getSystemService(Context.POWER_SERVICE) as PowerManager
+        val lock = power.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "ardour:transport")
+        lock.setReferenceCounted(false)
+
+        watcher = Thread {
+            var held = false
+            while (watching) {
+                val busy = try {
+                    val state = JSONObject(engine.call("transport.state", "{}"))
+                    state.optBoolean("rolling", false) || state.optBoolean("recording", false)
+                } catch (t: Throwable) {
+                    false
+                }
+                if (busy != held) {
+                    if (busy) {
+                        lock.acquire()
+                    } else {
+                        lock.release()
+                    }
+                    held = busy
+                    Log.i(TAG, "ARDOUR_SERVICE cpu awake=$held")
+                }
+                try {
+                    Thread.sleep(2000)
+                } catch (e: InterruptedException) {
+                    break
+                }
+            }
+            if (held) {
+                lock.release()
+            }
+        }.apply {
+            name = "ardour-wakelock"
+            isDaemon = true
+            start()
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -125,6 +185,10 @@ class ArdourService : Service() {
     }
 
     override fun onDestroy() {
+        /* the watcher owns the wake lock, so it is the one that lets go of it */
+        watching = false
+        watcher?.interrupt()
+        watcher = null
         noisy?.let { unregisterReceiver(it) }
         noisy = null
         focusRequest?.let { (getSystemService(Context.AUDIO_SERVICE) as AudioManager).abandonAudioFocusRequest(it) }
@@ -133,10 +197,21 @@ class ArdourService : Service() {
         Log.i(TAG, "ARDOUR_SERVICE gone removed=$removed")
         super.onDestroy()
         if (removed) {
-            /* libardour has no orderly teardown in this embedding yet, and the
-             * process must not sit there holding the audio device; a native
-             * shutdown is the follow-up, this releases everything now */
-            Process.killProcess(Process.myPid())
+            /* the user swiped the application away: let libardour stop the
+             * session, the engine and itself in that order - the process must
+             * not die holding the audio device and an unwritten state file -
+             * and only then take the process down.  This runs off the main
+             * thread: the teardown is not instant and onDestroy is not the
+             * place to block. */
+            Thread {
+                try {
+                    engine.stop()
+                    Log.i(TAG, "ARDOUR_SERVICE engine shut down on the way out")
+                } catch (t: Throwable) {
+                    Log.w(TAG, "the engine did not shut down cleanly: ${t.message}")
+                }
+                Process.killProcess(Process.myPid())
+            }.start()
         }
     }
 

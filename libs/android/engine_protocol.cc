@@ -435,6 +435,7 @@ post_to_engine_thread (Job const& job)
  */
 
 static bool             initialized = false;
+static bool             shut_down = false;
 static BridgeEventLoop* event_loop = 0;
 static Session*         session = 0;
 static std::string      sessions_root;
@@ -500,6 +501,9 @@ do_init (Paths const& paths)
 {
 	if (initialized) {
 		return status_json ();
+	}
+	if (shut_down) {
+		return error_reply ("the engine has been shut down");
 	}
 
 	/* where libardour looks for its modules and data, see search_paths.cc
@@ -3487,6 +3491,51 @@ call (std::string const& method, std::string const& params)
 		return error_reply ("the parameters are not a flat JSON object");
 	}
 	return run_on_engine_thread ([=] () mutable { return dispatch (method, p); });
+}
+
+/* The application is going away: give libardour the teardown it expects
+ * instead of letting the process die with an open audio device and half
+ * written files.  The order is the one headless/load_session.cc uses:
+ * stop the session, stop the engine, then ARDOUR::cleanup(), which is what
+ * destroys the AudioEngine singleton and the plugin manager.
+ *
+ * Nothing can be initialised again afterwards - ARDOUR::init() is a one-shot
+ * in this embedding - so a later init is refused rather than half done.
+ */
+std::string
+shutdown ()
+{
+	return run_on_engine_thread ([] () -> std::string {
+		if (shut_down) {
+			return "{\"ok\":true,\"was_initialized\":false}";
+		}
+
+		bool was = initialized;
+
+		if (session) {
+			session->request_stop ();
+			if (AudioEngine::instance ()) {
+				AudioEngine::instance ()->remove_session ();
+			}
+			delete session;
+			session = 0;
+		}
+
+		if (AudioEngine::instance ()) {
+			AudioEngine::instance ()->stop ();
+		}
+
+		if (was) {
+			/* the event loop is deliberately left behind: PBD::cleanup() is
+			 * inside this call and the thread keeps its pointer, and the
+			 * process is on its way out anyway */
+			ARDOUR::cleanup ();
+		}
+
+		initialized = false;
+		shut_down = true;
+		return std::string ("{\"ok\":true,\"was_initialized\":") + (was ? "true" : "false") + "}";
+	});
 }
 
 } /* namespace ArdourBridge */

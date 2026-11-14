@@ -29,6 +29,8 @@
  *                                         initialises libardour and starts
  *                                         the audio engine
  *   nativeCall (method, params)           one request of the frontend protocol
+ *   nativeShutdown ()                     stops the session, the engine and
+ *                                         libardour, for the way out
  *
  * Everything returns JSON.  The protocol itself (the methods, their
  * parameters and replies) is platform independent and lives in
@@ -156,5 +158,12 @@ Java_org_ardour_ardour_NativeEngine_nativeCall (JNIEnv* env, jobject /* self */,
                                                 jstring method, jstring params)
 {
 	std::string reply = ArdourBridge::call (jstring_to_string (env, method), jstring_to_string (env, params));
+	return env->NewStringUTF (reply.c_str ());
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_org_ardour_ardour_NativeEngine_nativeShutdown (JNIEnv* env, jobject /* self */)
+{
+	std::string reply = ArdourBridge::shutdown ();
 	return env->NewStringUTF (reply.c_str ());
 }

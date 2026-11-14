@@ -720,6 +720,11 @@ object SmokeTest {
             }
             if (heard > -30) break
         }
+        /* keep rolling for a while after the meter reads: the service watches
+         * the transport every two seconds to hold its wake lock, and CI reads
+         * that decision out of the log, so the window has to be wider than the
+         * watch interval rather than "as short as possible" */
+        Thread.sleep(5000)
         call(host, "transport.stop")
         if (heard <= -30) fail("the tone did not reach the track meter (peak $heard dBFS)")
         Log.i(TAG, "track meter peak $heard dBFS while the tone played")

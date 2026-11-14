@@ -120,6 +120,9 @@
  * All engine work happens on one thread owned by this module, which carries
  * the event loop and the session event pool libardour expects of a "GUI"
  * thread; call() hands a request to it and waits for the reply.
+ *
+ * shutdown() is not a protocol method: it is called by the host when the
+ * application is going away, and there is nothing left to talk to afterwards.
  */
 
 #ifndef __ardour_android_engine_protocol_h__
@@ -143,6 +146,12 @@ void        set_log_sink (LogSink);
 std::string init (Paths const&, std::string const& backend, std::string const& fallback_backend);
 std::string call (std::string const& method, std::string const& params);
 bool        engine_running ();
+
+/* Stops the session, the engine and libardour, in that order, so that a
+ * process that is about to exit leaves its files and the audio device in a
+ * sane state.  Idempotent, and init() refuses to run after it.
+ */
+std::string shutdown ();
 
 std::string json_escape (std::string const&);
 

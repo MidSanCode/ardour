@@ -1357,6 +1357,19 @@ jobs:
             test -n "$(adb shell pidof org.ardour.ardour)"
             echo 'still alive in the background after 5 s'
 
+            # --- the wake lock ---------------------------------------------------
+            # A running transport has to keep the cpu awake with the screen off.
+            # The service watches transport.state and holds a partial wake lock
+            # while it rolls, so both decisions appear in the log: one while the
+            # tone plays, one after it is stopped.  The smoke test keeps rolling
+            # for five seconds after its meter reading precisely so that the
+            # two-second watch has room to fire.
+            echo "--- ARDOUR_SERVICE lines ---"
+            grep 'ARDOUR_SERVICE' logcat.txt
+            grep -q 'ARDOUR_SERVICE cpu awake=true' logcat.txt
+            grep -q 'ARDOUR_SERVICE cpu awake=false' logcat.txt
+
+
       - name: Upload the log
         if: always()
         uses: actions/upload-artifact@v4

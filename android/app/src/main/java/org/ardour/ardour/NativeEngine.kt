@@ -33,4 +33,10 @@ object NativeEngine {
 
     /** One request of the frontend protocol. */
     external fun nativeCall(method: String, params: String): String
+
+    /**
+     * Stops the session, the engine and libardour, in that order.  Only for
+     * the way out: nothing can be initialised again afterwards.
+     */
+    external fun nativeShutdown(): String
 }

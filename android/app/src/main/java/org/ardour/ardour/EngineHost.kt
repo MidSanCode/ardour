@@ -21,6 +21,7 @@ class EngineHost(private val context: Context) {
 
     @Volatile private var initReply: String? = null
     @Volatile private var initError: String? = null
+    @Volatile private var stopped = false
     private var initFuture: Future<*>? = null
 
     val ready: Boolean get() = initReply != null && initError == null
@@ -28,6 +29,10 @@ class EngineHost(private val context: Context) {
     @Synchronized
     fun start(): Future<*> {
         initFuture?.let { return it }
+        if (stopped) {
+            /* the application is on its way out; libardour cannot come back */
+            return java.util.concurrent.CompletableFuture.completedFuture<Any?>(null)
+        }
         val f = executor.submit {
             try {
                 if (!NativeEngine.available) {
@@ -63,6 +68,9 @@ class EngineHost(private val context: Context) {
         if (err != null) {
             return JSONObject().put("ok", false).put("error", err).toString()
         }
+        if (stopped) {
+            return JSONObject().put("ok", false).put("error", "the engine has been shut down").toString()
+        }
         if (initReply == null) {
             if (method == "engine.status") {
                 return JSONObject().put("ok", true).put("initialized", false)
@@ -71,6 +79,34 @@ class EngineHost(private val context: Context) {
             return JSONObject().put("ok", false).put("error", "the engine is starting").toString()
         }
         return NativeEngine.nativeCall(method, params.ifEmpty { "{}" })
+    }
+
+    /**
+     * Orderly shutdown, for when the application is going away: the session is
+     * stopped and closed, the engine is stopped and libardour is cleaned up,
+     * so the process does not die holding an open audio device and a half
+     * written state file.  Idempotent; nothing works afterwards.
+     */
+    @Synchronized
+    fun stop(): String {
+        if (stopped) {
+            return "{\"ok\":true,\"already\":true}"
+        }
+        stopped = true
+        /* never tear down while the engine is still coming up */
+        try {
+            initFuture?.get()
+        } catch (t: Throwable) {
+            Log.w(TAG, "the engine never finished starting: ${t.message}")
+        }
+        val reply = try {
+            if (initReply != null && initError == null) NativeEngine.nativeShutdown() else "{\"ok\":true,\"was_initialized\":false}"
+        } catch (t: Throwable) {
+            "{\"ok\":false,\"error\":\"${t.message}\"}"
+        }
+        executor.shutdown()
+        Log.i(TAG, "engine shutdown: $reply")
+        return reply
     }
 
     /**
