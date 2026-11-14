@@ -899,20 +899,18 @@ object SmokeTest {
             fail("the session is still called ${afterRename.getString("name")}")
         }
 
+        /* three refusals, and they are the point of the whole thing: this is a
+         * rm -rf with no trash behind it */
         var refusals = 0
-        val refuseOpen = call(host, "session.delete", JSONObject().put("name", renamed).put("confirm", renamed))
-        if (refuseOpen.getBoolean("ok")) fail("the open session was deleted")
+        refused(host, "session.delete", JSONObject().put("name", renamed).put("confirm", renamed))
         refusals++
 
         call(host, "session.save")
         call(host, "session.close")
 
-        val wrongName = call(host, "session.delete", JSONObject().put("name", renamed).put("confirm", "nope"))
-        if (wrongName.getBoolean("ok")) fail("deleting without the name repeated back was allowed")
+        refused(host, "session.delete", JSONObject().put("name", renamed).put("confirm", "nope"))
         refusals++
-
-        val gone = call(host, "session.delete", JSONObject().put("name", "$name-gone").put("confirm", "$name-gone"))
-        if (gone.getBoolean("ok")) fail("a session that does not exist was deleted")
+        refused(host, "session.delete", JSONObject().put("name", "$name-gone").put("confirm", "$name-gone"))
         refusals++
 
         for (n in listOf(renamed, copy, fromTemplate)) {
